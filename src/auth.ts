@@ -1,25 +1,28 @@
-import { timingSafeEqual, randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Config } from './config.ts'
 
 interface Session {
   createdAt: number
   expiresAt: number
+  authority: string
+}
+
+interface RateBucket {
+  windowStart: number
+  count: number
 }
 
 export interface AuthService {
-  hasRequestSession(req: IncomingMessage): boolean
+  hasRequestSession(req: IncomingMessage, authority: string): boolean
   authorizeBootstrap(clientKey: string, submitted: string): boolean
-  createSession(): string
+  createSession(authority: string): string | undefined
   sessionCookie(id: string, secure: boolean): string
   stripSessionCookie(raw: string): string | undefined
 }
 
-function safeEqual(a: string, b: string): boolean {
-  const left = Buffer.from(a, 'utf8')
-  const right = Buffer.from(b, 'utf8')
-  if (left.length !== right.length) return false
-  return timingSafeEqual(left, right)
+function tokenDigest(value: string): Buffer {
+  return createHash('sha256').update(value, 'utf8').digest()
 }
 
 function readCookie(req: IncomingMessage, cookieName: string): string | undefined {
@@ -33,11 +36,20 @@ function readCookie(req: IncomingMessage, cookieName: string): string | undefine
   return undefined
 }
 
+function assertCookieName(name: string): void {
+  if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name)) {
+    throw new Error(`token-gate: invalid cookie name: ${JSON.stringify(name)}`)
+  }
+}
+
 export function createAuthService(config: Config, token: string): AuthService {
+  assertCookieName(config.cookieName)
   const ttlMs = config.sessionTtlDays * 24 * 60 * 60 * 1000
   const rateWindowMs = config.rateWindowMinutes * 60 * 1000
+  const expectedDigest = tokenDigest(token)
   const sessions = new Map<string, Session>()
-  const attempts = new Map<string, number[]>()
+  const attempts = new Map<string, RateBucket>()
+  let lastRateSweep = Date.now()
 
   function pruneSessions(): void {
     const now = Date.now()
@@ -57,40 +69,49 @@ export function createAuthService(config: Config, token: string): AuthService {
     return session
   }
 
+  function sweepRateBuckets(now: number): void {
+    if (now - lastRateSweep < rateWindowMs) return
+    for (const [key, bucket] of attempts) {
+      if (now - bucket.windowStart >= rateWindowMs) attempts.delete(key)
+    }
+    lastRateSweep = now
+  }
+
   function allowAttempt(key: string): boolean {
     const now = Date.now()
-    const list = (attempts.get(key) ?? []).filter(timestamp => now - timestamp < rateWindowMs)
-    if (list.length >= config.rateMax) {
-      attempts.set(key, list)
-      return false
-    }
-    list.push(now)
-    attempts.set(key, list)
-    if (attempts.size > 2000) {
-      for (const [candidate, timestamps] of attempts) {
-        const kept = timestamps.filter(timestamp => now - timestamp < rateWindowMs)
-        if (kept.length === 0) attempts.delete(candidate)
-        else attempts.set(candidate, kept)
+    sweepRateBuckets(now)
+    const existing = attempts.get(key)
+    if (existing !== undefined) {
+      if (now - existing.windowStart >= rateWindowMs) {
+        attempts.set(key, { windowStart: now, count: 1 })
+        return true
       }
+      if (existing.count >= config.rateMax) return false
+      existing.count += 1
+      return true
     }
+    if (attempts.size >= config.rateMaxKeys) return false
+    attempts.set(key, { windowStart: now, count: 1 })
     return true
   }
 
   return {
-    hasRequestSession(req) {
-      pruneSessions()
-      return getSession(readCookie(req, config.cookieName)) !== undefined
+    hasRequestSession(req, authority) {
+      const session = getSession(readCookie(req, config.cookieName))
+      return session !== undefined && session.authority === authority
     },
 
     authorizeBootstrap(clientKey, submitted) {
-      return allowAttempt(clientKey) && safeEqual(submitted, token)
+      if (!allowAttempt(clientKey)) return false
+      return timingSafeEqual(tokenDigest(submitted), expectedDigest)
     },
 
-    createSession() {
+    createSession(authority) {
       pruneSessions()
+      if (sessions.size >= config.sessionMax) return undefined
       const now = Date.now()
       const id = randomUUID()
-      sessions.set(id, { createdAt: now, expiresAt: now + ttlMs })
+      sessions.set(id, { createdAt: now, expiresAt: now + ttlMs, authority })
       return id
     },
 

@@ -1,17 +1,19 @@
 # dsh-token-gate — DSH Bundle patch.
 #
-# The gateway listens on its own port (default 0.0.0.0:3081) and proxies only
-# authorized requests to the local DSH web server. Point cloudflared/caddy at
-# this gateway port, never at the DSH port.
+# The gateway listens on its own port (default 0.0.0.0:3081) and requires the
+# injected DSH webServer to stay on 127.0.0.1. Point cloudflared/caddy at this
+# gateway port, never at the DSH port.
 #
 # Production is fail-closed: set DSH_AUTH_TOKEN in the DSH process environment
 # or provide config.token in a private patch layer. Do not commit secrets here.
 #
-# Example:
+# Forwarded headers are NOT trusted by default. Example for a local Caddy:
 #   - id: token-gate
 #     config:
+#       trustedProxies: ['127.0.0.1/32']
+#       realIpHeader: 'x-forwarded-for'
+#       trustedHosts: ['dsh.example.com'] # required for named-host IP allowlist bypass
 #       allowIps: ['192.168.1.0/24']
-#       trustedProxies: ['127.0.0.0/8', '::1/128']
 #
 # Applied with: dsh plugin --profile web add .
 

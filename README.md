@@ -1,6 +1,6 @@
 # dsh-token-gate
 
-DeepSeek Harness 的轻量 sidecar 网关插件。它在 DSH Web Server 前提供一个很窄的访问边界：首次使用预共享 token 换取 HttpOnly session，之后才允许 HTTP / WebSocket 流量进入 DSH。任何未授权访问都得到完全一致的纯文本 404。
+DeepSeek Harness 的轻量 sidecar 网关插件。它把 DSH 保持在 loopback，只在独立端口提供 token bootstrap、HttpOnly session、可选 IP allowlist 与 HTTP/WebSocket 反向代理。未授权 HTTP 请求统一得到同一份纯文本 404。
 
 ## 安全模型
 
@@ -8,27 +8,29 @@ DeepSeek Harness 的轻量 sidecar 网关插件。它在 DSH Web Server 前提�
 browser / cloudflared / caddy
               │
               ▼
-┌─ dsh-token-gate :3081 ───────────────────────┐
-│ valid session cookie                          │ → allow
-│ explicitly allowlisted client IP              │ → allow
-│ ?token=<valid bootstrap token>                │ → session + 303
-│ everything else                               │ → identical 404
-└───────────────────┬───────────────────────────┘
-                    ▼
-             127.0.0.1:<DSH port>
+┌─ dsh-token-gate :3081 ─────────────────────────────┐
+│ /?token=<secret>                  → session + 303   │
+│ authority-bound session + browser fence → allow    │
+│ allowlisted IP + Host fence             → allow    │
+│ everything else                         → 404      │
+└──────────────────────┬──────────────────────────────┘
+                       ▼
+                 127.0.0.1:<DSH>
 ```
 
-安全边界有几个明确约束：
+关键约束：
 
-- `Host` 不参与授权决策；网关没有隐式 loopback 免鉴权，因此本机反代也无法借 `Host: localhost` 获得旁路权限。
-- 本机可直接访问 DSH 原本的 loopback 端口；如果需要从网关免鉴权访问，显式把 `127.0.0.0/8` / `::1/128` 加入 `allowIps`。
-- `CF-Connecting-IP` / `X-Forwarded-For` / `X-Forwarded-Proto` 只在 TCP 对端属于 `trustedProxies` 时才可信。
-- 网关自己的 session cookie 在转发前会从 `Cookie` 中删除，DSH upstream 看不到它。
-- `Host` 会改写为 DSH loopback 地址，`Origin` 会移除；外部入口必须始终指向网关端口。
-- 未授权的 `/`、`/api/*`、旧 `/api/auth/*`、错误 token 和达到限流后的请求都返回同一份 404，不暴露鉴权状态或插件指纹。
-- 插件停止时会关闭监听端口和已升级的连接；不会回退成直连 DSH。
+- 插件启动时检查 `webServer.host`，DSH 如果监听 `0.0.0.0` 会直接拒绝启动，避免绕过 gateway 直连 DSH。
+- session 绑定首次成功 bootstrap 的外部 authority；同一 cookie 换 Host 后不会继续生效。
+- 浏览器请求在内部改写前检查 `Origin` 与 `Host` 是否同源，并拒绝 `Sec-Fetch-Site: cross-site`。通过后才把 Host/Origin 改成 DSH loopback authority。
+- `allowIps` 仍经过 Host fence：IP literal/loopback authority 可直接使用；命名 authority 需要列入 `trustedHosts`，防 DNS rebinding。
+- forwarded headers 默认全部不可信。只有 TCP peer 明确列入 `trustedProxies` 后，`realIpHeader` 才参与客户端 IP 判定。
+- 默认 `realIpHeader=x-forwarded-for`，按右向左跳过可信代理链，避免客户端伪造左侧 XFF。`CF-Connecting-IP` 仅在显式配置该模式、且直接代理保证覆盖该头时使用。
+- gateway session cookie、外部 proxy identity headers 和 hop-by-hop headers 不会透传给 DSH；upstream response 的 hop-by-hop headers 同样清理。
+- rate-limit identity 与 session store 都有硬上限，达到容量后 fail-closed。
+- Cordis activation 会等待端口真正监听；`EADDRINUSE` 等失败会让 effect/fiber 失败。dispose/HMR 会等待监听与升级 socket 关闭。
 
-404 响应只有：
+404 响应固定为：
 
 ```text
 404 page not found
@@ -36,75 +38,96 @@ browser / cloudflared / caddy
 
 ## 首次登录
 
-生产环境推荐把 token 放在 DSH 进程环境变量中：
+推荐在 DSH 进程环境中设置：
 
 ```sh
 export DSH_AUTH_TOKEN='replace-with-a-long-random-secret'
 ```
 
-然后访问：
+访问：
 
 ```text
 https://dsh.example.com/?token=replace-with-a-long-random-secret
 ```
 
-有效 token 会得到 `303`，网关设置 HttpOnly session cookie，并跳转到删除了 `token` 参数的干净 URL。之后访问只依赖 session cookie。
+只有根路径的 `token` query 属于 gateway。成功后返回 `303`、写入 HttpOnly session，并跳转到去掉 `token` 的干净 URL。`/chat?token=...`、`/api/...?...token=...` 等参数继续由 DSH/插件自己处理。
 
-> 远程部署必须使用 HTTPS。`?token=` 会出现在首次 HTTP 请求中，因此反向代理/CDN 的 access log 应关闭 query-string 记录或对 `token` 参数脱敏。网关响应会设置 `Referrer-Policy: no-referrer`，避免后续导航继续携带来源 URL。
+远程部署必须使用 HTTPS。首次 `?token=` 会进入 HTTP request line，因此反代/CDN access log 应关闭 query-string 记录或对 `token` 参数脱敏。响应带 `Referrer-Policy: no-referrer`。
 
-生产配置在没有 `config.token` 和 `DSH_AUTH_TOKEN` 时会直接拒绝启动鉴权逻辑。只有显式设置 `allowGeneratedToken: true` 才会生成临时 token；仓库内的 `cordis.dev.patch.yml` 仅在 loopback 开发模式下这样做。
+## 反向代理与真实客户端 IP
 
-## 安装与开发
+`trustedProxies` 默认是 `[]`。普通本地 Caddy 可显式配置：
 
-```sh
-pnpm install
-pnpm run check
-dsh plugin --profile web add .
+```yaml
+- id: token-gate
+  config:
+    trustedProxies: ['127.0.0.1/32']
+    realIpHeader: x-forwarded-for
 ```
 
-开发期可直接加载源码：
+`X-Forwarded-For` 会从最右侧开始解析：连续跳过 `trustedProxies`，第一个不可信地址才被视为真实客户端。缺失或含非法 IP 的 XFF 在可信代理模式下不会退回代理自身地址。
 
-```sh
-dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
+Cloudflare 专用头需要显式选择：
+
+```yaml
+realIpHeader: cf-connecting-ip
 ```
+
+只有在 gateway 的直接 TCP peer 确实保证覆盖 `CF-Connecting-IP` 时使用该模式。通用 Caddy 不应仅因为运行在 localhost 就自动信任客户端传入的 CF 头。
+
+## IP allowlist 与 trustedHosts
+
+当 `allowIps` 通过命名域名访问时，同时声明实际服务 authority：
+
+```yaml
+allowIps: ['192.168.1.0/24']
+trustedHosts: ['dsh.example.com']
+```
+
+`trustedHosts` 支持 canonical `host` 或 `host:port`；不带 port 表示该 hostname 的任意 port。非 canonical 值会在插件加载时直接报错。通过 IP literal URL 访问时无需额外 trusted host，因为浏览器 Host 无法用 DNS 名称重绑定成该 IP literal。
 
 ## 配置
 
 | 字段 | 默认值 | 说明 |
 |---|---:|---|
 | `token` | unset | bootstrap token；优先于 `DSH_AUTH_TOKEN` |
-| `cookieName` | `dsh_session` | HttpOnly session cookie 名 |
+| `cookieName` | `dsh_session` | HttpOnly session cookie 名，非法 cookie token 会拒绝加载 |
 | `sessionTtlDays` | `30` | session 有效期（天） |
-| `rateMax` | `10` | 每客户端每个窗口允许的 token 尝试次数 |
+| `sessionMax` | `4096` | 内存 session 最大数量 |
+| `rateMax` | `10` | 每客户端每窗口最大 bootstrap 尝试次数 |
 | `rateWindowMinutes` | `15` | 限流窗口（分钟） |
+| `rateMaxKeys` | `2048` | 同一窗口最多追踪的限流 identity 数 |
 | `allowIps` | `[]` | 免 session 的客户端 IP/CIDR，支持 IPv4/IPv6 |
-| `trustedProxies` | `127.0.0.0/8`, `::1/128` | 可以提供 forwarded headers 的 TCP 对端 |
-| `allowGeneratedToken` | `false` | 显式允许启动时生成临时 token；仅建议开发使用 |
-| `bind` | `0.0.0.0` | 网关监听地址 |
-| `port` | `3081` | 网关监听端口 |
-
-当 cloudflared/caddy 与 DSH 在同一主机运行时，默认 `trustedProxies` 足够。`trustedProxies` 只决定 forwarded headers 是否可信，不会自动放行代理自身。如果反代位于容器网络或另一台机器，必须只加入实际代理地址/CIDR，避免把整个不可信网络设为 trusted proxy。
+| `trustedProxies` | `[]` | 可提供 forwarded headers 的直接/链式代理 CIDR |
+| `trustedHosts` | `[]` | IP allowlist 经命名 authority 访问时允许的 host[:port] |
+| `realIpHeader` | `x-forwarded-for` | `none` / `x-forwarded-for` / `cf-connecting-ip` |
+| `allowGeneratedToken` | `false` | 显式允许生成临时 token，仅建议开发使用 |
+| `bind` | `0.0.0.0` | gateway 监听地址 |
+| `port` | `3081` | gateway 监听端口 |
 
 ## 请求转发
 
-授权后的 HTTP 请求以流方式转发。网关会：
+授权后的 HTTP 请求流式转发；WebSocket 使用同一访问策略。浏览器边界检查完成后，gateway 将 `Host` 改成 `127.0.0.1:<DSH port>`；如果原请求有 `Origin`，会改成对应 loopback Origin，使 DSH 自身 trust fence 继续看到一致的内部 authority。外部 forwarded identity headers 会被删除。
 
-- 重写 `Host` 为 `127.0.0.1:<DSH port>`；
-- 删除 `Origin`；
-- 删除 RFC hop-by-hop headers，以及 `Connection` 中声明的扩展 hop header；
-- 删除 token-gate 自己的 session cookie，同时保留应用的其他 cookie；
-- 对 WebSocket upgrade 进行同一套访问判定并建立双向管道。
+WebSocket upstream 如果拒绝升级并返回普通 HTTP（例如 426），gateway 会把该响应完整转回客户端；客户端在 upgrade header 后提前到达的 `head` 数据会等 upstream 101 后再写入升级 socket。
 
-## 测试与质量门禁
+## 安装、测试与开发
 
 ```sh
-pnpm test
+pnpm install
+pnpm run check
 pnpm run test:coverage
-pnpm run typecheck
-pnpm run build
+npm pack --dry-run
+dsh plugin --profile web add .
 ```
 
-CI 在 Linux 和 Windows 上执行 typecheck、覆盖率、build 与 `npm pack --dry-run`。覆盖率门禁为 lines 90%、branches 80%、functions 85%。核心回归覆盖 Host spoof、trusted proxy、IPv4/IPv6 CIDR、统一 404、token 清 URL、cookie 隔离、hop-by-hop header、WebSocket 与 dispose。
+开发期：
+
+```sh
+dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
+```
+
+CI 在 Linux 和 Windows 上执行 typecheck、覆盖率、build 与 tarball 检查；覆盖率门禁保持 lines 90%、branches 80%、functions 85%。
 
 ## License
 
