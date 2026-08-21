@@ -1,94 +1,110 @@
 # dsh-token-gate
 
-DeepSeek Harness 的 sidecar 网关插件：在 dsh 前面立一道 token 门禁，未授权的外部访问统一得到 **404 伪装页**，dsh 本身不暴露给外部。
+DeepSeek Harness 的轻量 sidecar 网关插件。它在 DSH Web Server 前提供一个很窄的访问边界：首次使用预共享 token 换取 HttpOnly session，之后才允许 HTTP / WebSocket 流量进入 DSH。任何未授权访问都得到完全一致的纯文本 404。
 
-## 为什么需要它
-
-DSH 的 web 服务默认只绑 loopback；社区里把它开放出去的办法无非三条：改源码绑 `0.0.0.0`、本地反代 + Cloudflare Tunnel、SSH 隧道。这些方案把 dsh 整个裸在网络上，`/api` 和 WebSocket 谁都能摸。本插件在流量到达 dsh 之前加一道认证层：
+## 安全模型
 
 ```text
-浏览器 / cloudflared / caddy
-        │  指向网关端口（默认 0.0.0.0:3081）
-        ▼
-┌─ dsh-token-gate（独立 node:http 服务器）──────────────┐
-│  本机 Host（127.0.0.1 / localhost）   → 放行          │
-│  白名单 IP / CIDR                    → 放行          │
-│  HttpOnly session cookie 有效        → 放行          │
-│  /api/auth/bootstrap|status|logout  → 网关自持       │
-│  其余（无 token 非白名单）            → 404 伪装页     │
-│  放行请求 → 反向代理 → 127.0.0.1:<dsh端口>           │
-│  WebSocket upgrade → 判定后转发（双向管道）            │
-└──────────────────────────────────────────────────────┘
+browser / cloudflared / caddy
+              │
+              ▼
+┌─ dsh-token-gate :3081 ───────────────────────┐
+│ direct loopback (socket + Host 都是 loopback) │ → allow
+│ valid session cookie                          │ → allow
+│ allowlisted client IP                         │ → allow
+│ ?token=<valid bootstrap token>                │ → session + 303
+│ everything else                               │ → identical 404
+└───────────────────┬───────────────────────────┘
+                    ▼
+             127.0.0.1:<DSH port>
 ```
 
-## 使用方式
+安全边界有几个明确约束：
 
-### 安装
+- 本机免鉴权同时检查 TCP 对端地址和 `Host`，远程客户端仅伪造 `Host: localhost` 无法绕过门禁。
+- `CF-Connecting-IP` / `X-Forwarded-For` / `X-Forwarded-Proto` 只在 TCP 对端属于 `trustedProxies` 时才可信。
+- 网关自己的 session cookie 在转发前会从 `Cookie` 中删除，DSH upstream 看不到它。
+- `Host` 会改写为 DSH loopback 地址，`Origin` 会移除；外部入口必须始终指向网关端口。
+- 未授权的 `/`、`/api/*`、旧 `/api/auth/*`、错误 token 和达到限流后的请求都返回同一份 404，不暴露鉴权状态或插件指纹。
+- 插件停止时会关闭监听端口和已升级的连接；不会回退成直连 DSH。
+
+404 响应只有：
+
+```text
+404 page not found
+```
+
+## 首次登录
+
+生产环境推荐把 token 放在 DSH 进程环境变量中：
 
 ```sh
-cd dsh-token-gate
+export DSH_AUTH_TOKEN='replace-with-a-long-random-secret'
+```
+
+然后访问：
+
+```text
+https://dsh.example.com/?token=replace-with-a-long-random-secret
+```
+
+有效 token 会得到 `303`，网关设置 HttpOnly session cookie，并跳转到删除了 `token` 参数的干净 URL。之后访问只依赖 session cookie。
+
+> 远程部署必须使用 HTTPS。`?token=` 会出现在首次 HTTP 请求中，因此反向代理/CDN 的 access log 应关闭 query-string 记录或对 `token` 参数脱敏。网关响应会设置 `Referrer-Policy: no-referrer`，避免后续导航继续携带来源 URL。
+
+生产配置在没有 `config.token` 和 `DSH_AUTH_TOKEN` 时会直接拒绝启动鉴权逻辑。只有显式设置 `allowGeneratedToken: true` 才会生成临时 token；仓库内的 `cordis.dev.patch.yml` 仅在 loopback 开发模式下这样做。
+
+## 安装与开发
+
+```sh
 pnpm install
-pnpm run build
+pnpm run check
 dsh plugin --profile web add .
 ```
 
-或开发期直接加载源码：
+开发期可直接加载源码：
 
 ```sh
 dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
 ```
 
-### 配置 token
+## 配置
 
-优先级：`config.token` → 环境变量 `DSH_AUTH_TOKEN` → 启动时随机生成并打印到日志（搜 `generated access token`）。
+| 字段 | 默认值 | 说明 |
+|---|---:|---|
+| `token` | unset | bootstrap token；优先于 `DSH_AUTH_TOKEN` |
+| `cookieName` | `dsh_session` | HttpOnly session cookie 名 |
+| `sessionTtlDays` | `30` | session 有效期（天） |
+| `rateMax` | `10` | 每客户端每个窗口允许的 token 尝试次数 |
+| `rateWindowMinutes` | `15` | 限流窗口（分钟） |
+| `allowIps` | `[]` | 免 session 的客户端 IP/CIDR，支持 IPv4/IPv6 |
+| `trustedProxies` | `127.0.0.0/8`, `::1/128` | 可以提供 forwarded headers 的 TCP 对端 |
+| `allowGeneratedToken` | `false` | 显式允许启动时生成临时 token；仅建议开发使用 |
+| `bind` | `0.0.0.0` | 网关监听地址 |
+| `port` | `3081` | 网关监听端口 |
 
-### 配置项（Config）
+当 cloudflared/caddy 与 DSH 在同一主机运行时，默认 `trustedProxies` 足够。如果反代位于容器网络或另一台机器，必须只加入实际代理地址/CIDR，避免把整个不可信网络设为 trusted proxy。
 
-| 字段 | 类型 | 默认值 | 说明 |
-|---|---|---|---|
-| `token` | string | 无 | 预共享 bootstrap token；未设置时读 `DSH_AUTH_TOKEN`，再未设置则随机生成并打印 |
-| `cookieName` | string | `dsh_session` | HttpOnly session cookie 名 |
-| `sessionTtlDays` | number | `30` | 会话有效期（天） |
-| `rateMax` | number | `10` | 每客户端在窗口内的最大 bootstrap 尝试次数 |
-| `rateWindowMinutes` | number | `15` | 限流窗口（分钟） |
-| `allowIps` | string[] | `[]` | 免 token 放行的来源 IP 或 CIDR（如 `192.168.1.0/24`、`100.64.0.0/10`） |
-| `bind` | string | `0.0.0.0` | 网关绑定地址；只想本机代理访问时改 `127.0.0.1` |
-| `port` | number | `3081` | 网关监听端口 |
+## 请求转发
 
-示例：
+授权后的 HTTP 请求以流方式转发。网关会：
 
-```yaml
-- id: token-gate
-  config:
-    allowIps: ['192.168.1.0/24']
-    bind: '127.0.0.1'
+- 重写 `Host` 为 `127.0.0.1:<DSH port>`；
+- 删除 `Origin`；
+- 删除 RFC hop-by-hop headers，以及 `Connection` 中声明的扩展 hop header；
+- 删除 token-gate 自己的 session cookie，同时保留应用的其他 cookie；
+- 对 WebSocket upgrade 进行同一套访问判定并建立双向管道。
+
+## 测试与质量门禁
+
+```sh
+pnpm test
+pnpm run test:coverage
+pnpm run typecheck
+pnpm run build
 ```
 
-## 工作原理
-
-### 判定顺序
-
-1. Host 头是 loopback（`127.0.0.1` / `localhost`）→ 放行。本地用户走网关端口也不受影响。
-2. 路径是 `/api/auth/*` → 网关自持（bootstrap 发 token、logout 撤销、status 查状态）。auth 路径永远优先于 cookie/IP 判定。
-3. session cookie 有效 → 放行。
-4. 来源 IP 在白名单 → 放行。
-5. 其余 → 404 伪装页。
-
-来源 IP 的判定：当对端 socket 是 loopback 但 Host 不是（流量经本机 cloudflared 之类的可信代理），取 `CF-Connecting-IP`，其次 `X-Forwarded-For` 第一跳；直连场景只用 socket 地址，防止伪造头冒充白名单。
-
-### 转发细节
-
-- Host 头改写为 `127.0.0.1:<dsh端口>`，Origin 头剥离：dsh 自己的浏览器信任栅栏（DNS-rebinding 防御）把它当 loopback 放行，因此**不需要 `--trusted-host`**。认证责任整体转移到网关，dsh 侧零配置。
-- 请求体与响应体全程流式管道，SSE / 大文件不受影响。
-- WebSocket：网关判定后把 upgrade 请求转发给 dsh，101 握手回写，双向字节流管道；任一端断开都会拆掉对端，不留半开连接。
-
-### 安全边界
-
-- 未授权请求在网关就被截停，dsh 一个字节都不会发出，不存在"先加载内容再遇到门禁"的问题。
-- 404 页面是纯静态伪装页（nginx 风格），不含 dsh 任何指纹；只有 URL 带 `#token=` 时隐藏脚本才会工作。
-- 网关是插件进程的一部分：插件停止 → 网关端口关闭 → 外部直接连不上（fail-closed），不会回退成裸奔。
-- 会话在内存中，进程重启全员下线（符合预期；多实例/持久化需换 SQLite/Redis，协议不变）。
-- **外部入口必须指向网关端口**。如果把 cloudflared/caddy 指回 dsh 原端口，门禁即被绕过——这是部署配置责任，不是插件职责。
+CI 在 Linux 和 Windows 上执行 typecheck、覆盖率、build 与 `npm pack --dry-run`。覆盖率门禁为 lines 90%、branches 80%、functions 85%。核心回归覆盖 Host spoof、trusted proxy、IPv4/IPv6 CIDR、统一 404、token 清 URL、cookie 隔离、hop-by-hop header、WebSocket 与 dispose。
 
 ## License
 

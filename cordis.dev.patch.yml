@@ -1,9 +1,12 @@
-# dsh-token-gate — development overlay: load the local TypeScript source
-# directly, without building. Replace /ABSOLUTE/PATH/TO with the real absolute
-# path of this checkout, then run:
-#
+# Development overlay: load local TypeScript directly.
+# Replace /ABSOLUTE/PATH/TO and run:
 #   dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
+#
+# Dev mode explicitly permits a generated token and binds it to loopback only.
 
 - insert:
     - id: token-gate
       name: '/ABSOLUTE/PATH/TO/dsh-token-gate/src/index.ts'
+      config:
+        bind: '127.0.0.1'
+        allowGeneratedToken: true

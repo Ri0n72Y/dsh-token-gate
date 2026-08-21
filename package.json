@@ -1,10 +1,27 @@
 {
   "name": "dsh-token-gate",
-  "version": "0.2.0",
-  "description": "Sidecar gateway for DeepSeek Harness: token-bootstrap + HttpOnly-session entry gate with 404 disguise, IP allowlist, and reverse proxy to the local dsh web server",
-  "private": true,
+  "version": "0.3.0",
+  "description": "Opaque token-bootstrap gateway for DeepSeek Harness with HttpOnly sessions, IP allowlists, trusted-proxy handling, and reverse proxying",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "gateway",
+    "authentication",
+    "reverse-proxy"
+  ],
   "type": "module",
   "packageManager": "pnpm@11.7.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ri0n72Y/dsh-token-gate.git"
+  },
+  "homepage": "https://github.com/Ri0n72Y/dsh-token-gate#readme",
+  "bugs": {
+    "url": "https://github.com/Ri0n72Y/dsh-token-gate/issues"
+  },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
@@ -20,6 +37,9 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -28,9 +48,11 @@
   "scripts": {
     "build": "tsdown --config tsdown.config.ts",
     "typecheck": "tsc --noEmit",
-    "check": "pnpm run typecheck && pnpm run build",
-    "smoke": "node test/smoke.mjs",
+    "test": "node --experimental-strip-types --test \"test/**/*.test.ts\"",
+    "test:coverage": "node --experimental-strip-types --experimental-test-coverage --test-coverage-exclude=\"test/**\" --test-coverage-lines=90 --test-coverage-branches=80 --test-coverage-functions=85 --test \"test/**/*.test.ts\"",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build",
     "prepare": "tsdown --config tsdown.config.ts",
+    "prepack": "pnpm run check",
     "deploy": "pnpm run prepare && dsh plugin --profile web add ."
   },
   "peerDependencies": {
@@ -45,6 +67,5 @@
     "@types/node": "^22.20.1",
     "tsdown": "^0.22.2",
     "typescript": "^6.0.3"
-  },
-  "license": "MIT"
+  }
 }
