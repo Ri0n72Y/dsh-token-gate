@@ -4,7 +4,7 @@
 
 ### Security
 
-- Require both loopback TCP peer and loopback Host for local bypass, closing the Host-header spoof path.
+- Remove implicit loopback bypass entirely; Host headers no longer participate in authorization, closing proxy-assisted Host spoof paths.
 - Trust forwarded client/protocol headers only from configured trusted proxies.
 - Replace the script-bearing 404/bootstrap API with a server-side query-token exchange and a uniform opaque 404 response.
 - Strip the gateway session cookie before forwarding traffic to DSH.

@@ -9,9 +9,8 @@ browser / cloudflared / caddy
               │
               ▼
 ┌─ dsh-token-gate :3081 ───────────────────────┐
-│ direct loopback (socket + Host 都是 loopback) │ → allow
 │ valid session cookie                          │ → allow
-│ allowlisted client IP                         │ → allow
+│ explicitly allowlisted client IP              │ → allow
 │ ?token=<valid bootstrap token>                │ → session + 303
 │ everything else                               │ → identical 404
 └───────────────────┬───────────────────────────┘
@@ -21,7 +20,8 @@ browser / cloudflared / caddy
 
 安全边界有几个明确约束：
 
-- 本机免鉴权同时检查 TCP 对端地址和 `Host`，远程客户端仅伪造 `Host: localhost` 无法绕过门禁。
+- `Host` 不参与授权决策；网关没有隐式 loopback 免鉴权，因此本机反代也无法借 `Host: localhost` 获得旁路权限。
+- 本机可直接访问 DSH 原本的 loopback 端口；如果需要从网关免鉴权访问，显式把 `127.0.0.0/8` / `::1/128` 加入 `allowIps`。
 - `CF-Connecting-IP` / `X-Forwarded-For` / `X-Forwarded-Proto` 只在 TCP 对端属于 `trustedProxies` 时才可信。
 - 网关自己的 session cookie 在转发前会从 `Cookie` 中删除，DSH upstream 看不到它。
 - `Host` 会改写为 DSH loopback 地址，`Origin` 会移除；外部入口必须始终指向网关端口。
@@ -83,7 +83,7 @@ dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
 | `bind` | `0.0.0.0` | 网关监听地址 |
 | `port` | `3081` | 网关监听端口 |
 
-当 cloudflared/caddy 与 DSH 在同一主机运行时，默认 `trustedProxies` 足够。如果反代位于容器网络或另一台机器，必须只加入实际代理地址/CIDR，避免把整个不可信网络设为 trusted proxy。
+当 cloudflared/caddy 与 DSH 在同一主机运行时，默认 `trustedProxies` 足够。`trustedProxies` 只决定 forwarded headers 是否可信，不会自动放行代理自身。如果反代位于容器网络或另一台机器，必须只加入实际代理地址/CIDR，避免把整个不可信网络设为 trusted proxy。
 
 ## 请求转发
 

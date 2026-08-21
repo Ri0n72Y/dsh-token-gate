@@ -6,7 +6,8 @@ This repository is a security boundary in front of DeepSeek Harness. Prefer smal
 
 ## Invariants
 
-- A remote socket cannot gain local-bypass privileges by controlling HTTP headers.
+- There is no implicit loopback bypass; any IP bypass must be explicit in `allowIps`.
+- HTTP `Host` is routing metadata only and must not participate in authorization.
 - Forwarded client/protocol headers are trusted only from `trustedProxies`.
 - Unauthenticated HTTP responses are intentionally indistinguishable.
 - The bootstrap token must never be proxied to DSH.

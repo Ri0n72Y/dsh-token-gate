@@ -52,35 +52,6 @@ export class IpSet {
   }
 }
 
-export function isLoopbackIp(input: string | undefined): boolean {
-  const address = normalizeIp(input)
-  if (address === '::1') return true
-  if (isIP(address) !== 4) return false
-  return address.split('.')[0] === '127'
-}
-
-export function hostnameOf(authority: string): string {
-  if (authority.length === 0) return ''
-  if (authority[0] === '[') {
-    const end = authority.indexOf(']')
-    return (end === -1 ? authority : authority.slice(0, end + 1)).toLowerCase()
-  }
-  const colon = authority.lastIndexOf(':')
-  if (colon === -1) return authority.toLowerCase()
-  const port = authority.slice(colon + 1)
-  if (/^\d+$/.test(port)) return authority.slice(0, colon).toLowerCase()
-  return authority.toLowerCase()
-}
-
-export function isLoopbackHost(authority: string): boolean {
-  const host = hostnameOf(authority)
-  if (host === 'localhost' || host === '[::1]') return true
-  const parts = host.split('.')
-  return parts.length === 4
-    && parts[0] === '127'
-    && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
-}
-
 export function firstHeader(headers: IncomingHttpHeaders, name: string): string | undefined {
   const value = headers[name]
   if (typeof value === 'string') return value

@@ -1,7 +1,7 @@
 import type { IncomingMessage } from 'node:http'
 import type { Config } from './config.ts'
 import type { AuthService } from './auth.ts'
-import { firstHeader, IpSet, isLoopbackHost, isLoopbackIp, normalizeIp } from './net.ts'
+import { firstHeader, IpSet, normalizeIp } from './net.ts'
 
 export type AccessDecision = 'allow' | 'bootstrap' | 'deny'
 
@@ -23,8 +23,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
 
   function clientIp(req: IncomingMessage): string {
     const peer = normalizeIp(req.socket.remoteAddress)
-    const host = firstHeader(req.headers, 'host') ?? ''
-    if (!trustedProxies.has(peer) || isLoopbackHost(host)) return peer
+    if (!trustedProxies.has(peer)) return peer
 
     const cf = firstHeader(req.headers, 'cf-connecting-ip')
     if (cf !== undefined && normalizeIp(cf).length > 0) return normalizeIp(cf)
@@ -44,8 +43,6 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
 
   return {
     decide(req) {
-      const host = firstHeader(req.headers, 'host') ?? ''
-      if (isLoopbackIp(req.socket.remoteAddress) && isLoopbackHost(host)) return 'allow'
       if (bootstrapToken(req) !== undefined) return 'bootstrap'
       if (auth.hasRequestSession(req)) return 'allow'
       if (allowedIps.has(clientIp(req))) return 'allow'

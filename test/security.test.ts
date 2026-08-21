@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import type { IncomingMessage } from 'node:http'
 import { createAuthService } from '../src/auth.ts'
 import { createAccessPolicy } from '../src/access.ts'
-import { IpSet, isLoopbackHost, isLoopbackIp } from '../src/net.ts'
+import { IpSet } from '../src/net.ts'
 import type { Config } from '../src/config.ts'
 
 const baseConfig: Config = {
@@ -29,15 +29,6 @@ function fakeReq(remoteAddress: string, host: string, extra: Partial<IncomingMes
   } as unknown as IncomingMessage
 }
 
-test('loopback helpers accept only loopback addresses and hosts', () => {
-  assert.equal(isLoopbackIp('127.0.0.1'), true)
-  assert.equal(isLoopbackIp('::ffff:127.0.0.1'), true)
-  assert.equal(isLoopbackIp('203.0.113.9'), false)
-  assert.equal(isLoopbackHost('localhost:3081'), true)
-  assert.equal(isLoopbackHost('127.9.8.7:3081'), true)
-  assert.equal(isLoopbackHost('example.com'), false)
-})
-
 test('IpSet supports IPv4 and IPv6 CIDR and rejects invalid entries', () => {
   const set = new IpSet(['10.0.0.0/8', '2001:db8::/32'])
   assert.equal(set.has('10.2.3.4'), true)
@@ -54,11 +45,15 @@ test('remote peer cannot bypass the gate with Host: localhost', () => {
   assert.equal(access.decide(req), 'deny')
 })
 
-test('direct loopback requires both loopback socket and loopback Host', () => {
+test('loopback has no implicit bypass; it must be explicitly allowlisted', () => {
   const auth = createAuthService(baseConfig, 'secret')
   const access = createAccessPolicy(baseConfig, auth)
-  assert.equal(access.decide(fakeReq('127.0.0.1', 'localhost:3081')), 'allow')
-  assert.equal(access.decide(fakeReq('127.0.0.1', 'dsh.example.com')), 'deny')
+  assert.equal(access.decide(fakeReq('127.0.0.1', 'localhost:3081')), 'deny')
+
+  const allowedConfig = { ...baseConfig, allowIps: ['127.0.0.0/8'] }
+  const allowedAuth = createAuthService(allowedConfig, 'secret')
+  const allowedAccess = createAccessPolicy(allowedConfig, allowedAuth)
+  assert.equal(allowedAccess.decide(fakeReq('127.0.0.1', 'localhost:3081')), 'allow')
 })
 
 test('forwarded client IP is trusted only from configured proxy peers', () => {
