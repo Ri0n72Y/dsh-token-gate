@@ -1,0 +1,23 @@
+# dsh-token-gate — DSH Bundle patch.
+#
+# Installs the sidecar gateway into the web profile. The gateway listens on
+# its own port (default 3081, bind 0.0.0.0) and proxies authorized requests
+# to the local dsh webserver; everything else answers 404. Point
+# cloudflared/caddy at the GATEWAY port, not the dsh port.
+#
+# The `token` field is intentionally left unset here: resolve it via the
+# DSH_AUTH_TOKEN env var (recommended) or pin a value in your own profile
+# patch layer. When neither is set, the plugin generates a random token at
+# startup and logs it (look for "generated access token").
+#
+# Example with allowlist:
+#   - id: token-gate
+#     config:
+#       allowIps: ['192.168.1.0/24', '100.64.0.0/10']
+#
+# Applied with:  dsh plugin --profile web add .
+# Dev overlay:   dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
+
+- insert:
+    - id: token-gate
+      name: 'dsh-token-gate'
