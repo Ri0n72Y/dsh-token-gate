@@ -1,11 +1,12 @@
 import { randomBytes } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
 
-export type RealIpHeader = 'none' | 'x-forwarded-for' | 'cf-connecting-ip'
+export type RealIpHeader = 'none' | 'x-forwarded-for'
 
 export interface Config {
   token?: string
   cookieName: string
+  secureCookie: boolean
   sessionTtlDays: number
   sessionMax: number
   rateMax: number
@@ -23,6 +24,7 @@ export interface Config {
 export const Config: Schema<Config> = Schema.object({
   token: Schema.string(),
   cookieName: Schema.string().default('dsh_session'),
+  secureCookie: Schema.boolean().default(true),
   sessionTtlDays: Schema.natural().min(1).max(365).default(30),
   sessionMax: Schema.natural().min(1).max(100000).default(4096),
   rateMax: Schema.natural().min(1).default(10),
@@ -34,10 +36,9 @@ export const Config: Schema<Config> = Schema.object({
   realIpHeader: Schema.union([
     Schema.const('none'),
     Schema.const('x-forwarded-for'),
-    Schema.const('cf-connecting-ip'),
   ]).default('x-forwarded-for'),
   allowGeneratedToken: Schema.boolean().default(false),
-  bind: Schema.union([Schema.const('0.0.0.0'), Schema.const('127.0.0.1')]).default('0.0.0.0'),
+  bind: Schema.union([Schema.const('0.0.0.0'), Schema.const('127.0.0.1')]).default('127.0.0.1'),
   port: Schema.natural().min(1).max(65535).default(3081),
 })
 
