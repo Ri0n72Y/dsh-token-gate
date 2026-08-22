@@ -15,7 +15,8 @@ This repository is a security boundary in front of DeepSeek Harness. Prefer smal
 - Browser `Origin` and Fetch Metadata are validated before internal Host/Origin rewriting, including bootstrap.
 - Ordinary authenticated requests reject explicit cross-site Fetch Metadata. Bootstrap may accept cross-site traffic only for a user-activated top-level document navigation; fetch/XHR, iframe, non-user navigation, or conflicting Origin must remain denied.
 - Request-target parsing is fail-closed: malformed, absolute-form, scheme-relative, or normalization-trick targets must not escape the opaque deny surface.
-- Unauthenticated HTTP responses are intentionally indistinguishable where an HTTP response can be emitted, including parser errors.
+- Unauthenticated HTTP responses are intentionally indistinguishable where an HTTP response can be emitted, including parser errors, `Expect` handling, and `CONNECT`.
+- The gateway owns `Expect: 100-continue`: it sends `100 Continue` only after an ordinary request is authorized, rejects unsupported expectations through the opaque deny surface, and never forwards `Expect` upstream.
 - Bootstrap is reserved only for the literal `/?token=...` request target; application query parameters named `token` on other paths remain application-owned.
 - Session cookies are `Secure` by default. Disabling `secureCookie` is an explicit local-development choice.
 - The bootstrap token and gateway session cookie must never be proxied to DSH, and upstream responses must not overwrite the gateway cookie namespace.
