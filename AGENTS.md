@@ -23,6 +23,14 @@ This repository is a small authentication/reverse-proxy boundary in front of Dee
 - Cordis activation awaits gateway listen, and disposal does not resolve until the gateway listener and all tracked client sockets, including upgraded sockets, have closed.
 - Rate-limit identities and sessions have hard cardinality bounds.
 
+## Testing discipline
+
+- Tests protect observable plugin behavior, non-trivial parsing/state rules, or a reproduced regression.
+- Do not simulate Cordis internals with fake `Context`/`effect` implementations merely to claim framework integration coverage.
+- Do not duplicate the same invariant at unit, integration, and framework layers unless each layer catches a distinct failure mode.
+- Coverage reports are diagnostic only. Never add tests, branches, fixtures, platform jobs, or production code solely to reach a percentage target.
+- Platform matrices must follow the plugin's actual supported/tested environment. The current development target is Windows with Node 22; broader matrices require a concrete platform-specific reason.
+
 ## Validation
 
-Run `pnpm run typecheck`, `pnpm run test:coverage`, `pnpm run build`, and `npm pack --dry-run` before release-facing changes. Transport and lifecycle changes should include both allowed and denied/error-path regressions. CI covers the Node 22 floor on Linux and Windows plus Node 24 on Linux.
+For release-facing changes run `pnpm run check` and `npm pack --dry-run`. `pnpm run test:coverage` may be used to inspect blind spots, but its percentage is not a release gate. Add regression tests only when they protect behavior affected by the change.
