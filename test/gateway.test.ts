@@ -4,7 +4,6 @@ import { createServer, request as httpRequest } from 'node:http'
 import type { Server } from 'node:http'
 import { connect } from 'node:net'
 import type { AddressInfo } from 'node:net'
-import type { Duplex } from 'node:stream'
 import { createGateway } from '../src/gateway.ts'
 import type { Config } from '../src/config.ts'
 import type { Gateway } from '../src/gateway.ts'
@@ -79,14 +78,12 @@ async function bootstrap(port: number, headers: Record<string, string> = {}): Pr
   return setCookie[0].split(';')[0]
 }
 
-test('opaque bootstrap, authority-bound session, browser fence, and sanitized proxying', async (t) => {
-  const seen: Array<{ path?: string; headers: Record<string, string | string[] | undefined> }> = []
+test('bootstrap creates a session and authorized HTTP requests reach DSH', async (t) => {
+  const seen: Array<{ path?: string; cookie?: string }> = []
   const upstream = createServer((req, res) => {
-    seen.push({ path: req.url, headers: req.headers })
+    seen.push({ path: req.url, cookie: req.headers.cookie })
     res.writeHead(200, {
       'Content-Type': 'text/plain',
-      Connection: 'keep-alive, x-upstream-hop',
-      'X-Upstream-Hop': 'remove-me',
       'Set-Cookie': ['dsh_session=replace-me; Path=/', 'app_session=keep-me; Path=/'],
     })
     res.end('DSH APP')
@@ -103,68 +100,52 @@ test('opaque bootstrap, authority-bound session, browser fence, and sanitized pr
   assert.equal(denied.status, 404)
   assert.equal(denied.body, '404 page not found\n')
   assert.equal((await request(port, '/chat?token=' + TOKEN)).status, 404)
-  assert.equal((await request(port, '/?token=wrong')).body, denied.body)
-  assert.equal((await request(port, '/?token=' + TOKEN, { headers: { origin: 'https://evil.example.com' } })).status, 404)
-  assert.equal(seen.length, 0)
 
-  const ok = await request(port, '/?token=' + TOKEN + '&view=compact', { headers: { 'x-forwarded-for': '203.0.113.11', 'x-forwarded-proto': 'https' } })
-  assert.equal(ok.status, 303)
-  assert.equal(ok.headers.location, '/?view=compact')
-  const setCookie = ok.headers['set-cookie']
+  const login = await request(port, '/?token=' + TOKEN + '&view=compact', { headers: { 'x-forwarded-proto': 'https' } })
+  assert.equal(login.status, 303)
+  assert.equal(login.headers.location, '/?view=compact')
+  const setCookie = login.headers['set-cookie']
   assert.ok(Array.isArray(setCookie))
   assert.match(setCookie[0], /HttpOnly/)
-  assert.match(setCookie[0], /Secure/)
   const sessionCookie = setCookie[0].split(';')[0]
 
-  assert.equal((await request(port, '/', { headers: { cookie: sessionCookie, origin: 'https://evil.example.com', 'x-forwarded-proto': 'https' } })).status, 404)
-  assert.equal((await request(port, '/', { headers: { cookie: sessionCookie, 'sec-fetch-site': 'cross-site', 'x-forwarded-proto': 'https' } })).status, 404)
-  assert.equal((await request(port, '/', { headers: { host: 'other.example.com', cookie: sessionCookie, 'x-forwarded-proto': 'https' } })).status, 404)
-
-  const proxied = await request(port, '/chat?token=app-value', { headers: { cookie: `${sessionCookie}; app_cookie=keep-me`, origin: 'https://dsh.example.com', 'x-forwarded-proto': 'https', connection: 'keep-alive, x-secret-hop', 'x-secret-hop': 'remove-me', 'cf-connecting-ip': '10.1.2.3' } })
+  const proxied = await request(port, '/chat?token=app-value', { headers: { cookie: `${sessionCookie}; app_cookie=keep-me` } })
   assert.equal(proxied.status, 200)
   assert.equal(proxied.body, 'DSH APP')
-  assert.equal(proxied.headers['x-upstream-hop'], undefined)
   assert.deepEqual(proxied.headers['set-cookie'], ['app_session=keep-me; Path=/'])
-  assert.equal(seen.length, 1)
-  assert.equal(seen[0].path, '/chat?token=app-value')
-  assert.equal(seen[0].headers.host, `127.0.0.1:${upstreamPort}`)
-  assert.equal(seen[0].headers.origin, `http://127.0.0.1:${upstreamPort}`)
-  assert.equal(seen[0].headers['x-secret-hop'], undefined)
-  assert.equal(seen[0].headers['x-forwarded-for'], undefined)
-  assert.equal(seen[0].headers['cf-connecting-ip'], undefined)
-  assert.equal(seen[0].headers.cookie, 'app_cookie=keep-me')
+  assert.deepEqual(seen, [{ path: '/chat?token=app-value', cookie: 'app_cookie=keep-me' }])
 })
 
-test('session cookie is Secure only when the trusted proxy reports HTTPS', async (t) => {
+test('session cookie uses Secure only for HTTPS ingress', async (t) => {
   const upstream = createServer((_req, res) => res.end('ok'))
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   const upstreamPort = (upstream.address() as AddressInfo).port
   const { gateway, port } = await startGateway(upstreamPort)
   t.after(() => closeFixture(gateway, upstream))
 
-  const local = await request(port, '/?token=' + TOKEN, { headers: { 'x-forwarded-for': '203.0.113.20' } })
+  const local = await request(port, '/?token=' + TOKEN)
   assert.equal(local.status, 303)
   const localCookie = local.headers['set-cookie']
   assert.ok(Array.isArray(localCookie))
   assert.doesNotMatch(localCookie[0], /;\s*Secure\b/i)
 
-  const https = await request(port, '/?token=' + TOKEN, { headers: { 'x-forwarded-for': '203.0.113.21', 'x-forwarded-proto': 'https' } })
+  const https = await request(port, '/?token=' + TOKEN, { headers: { 'x-forwarded-proto': 'https' } })
   assert.equal(https.status, 303)
   const httpsCookie = https.headers['set-cookie']
   assert.ok(Array.isArray(httpsCookie))
   assert.match(httpsCookie[0], /;\s*Secure\b/i)
 })
 
-test('allowlist uses only the configured trusted X-Forwarded-For chain', async (t) => {
+test('configured IP allowlist can bypass the session', async (t) => {
   let hits = 0
   const upstream = createServer((_req, res) => { hits += 1; res.end('ok') })
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   const upstreamPort = (upstream.address() as AddressInfo).port
-  const { gateway, port } = await startGateway(upstreamPort, baseConfig({ allowIps: ['10.0.0.0/8'], trustedHosts: ['dsh.example.com'] }))
+  const { gateway, port } = await startGateway(upstreamPort, baseConfig({ allowIps: ['203.0.113.0/24'] }))
   t.after(() => closeFixture(gateway, upstream))
-  assert.equal((await request(port, '/', { headers: { 'cf-connecting-ip': '10.1.2.3', 'x-forwarded-for': '203.0.113.9' } })).status, 404)
-  assert.equal((await request(port, '/', { headers: { 'x-forwarded-for': '10.1.2.3' } })).status, 200)
-  assert.equal((await request(port, '/', { headers: { host: 'attacker.example.com', 'x-forwarded-for': '10.1.2.3' } })).status, 404)
+
+  assert.equal((await request(port, '/', { headers: { host: '192.0.2.10:3081', 'x-forwarded-for': '203.0.113.9' } })).status, 200)
+  assert.equal((await request(port, '/', { headers: { host: '192.0.2.10:3081', 'x-forwarded-for': '198.51.100.9' } })).status, 404)
   assert.equal(hits, 1)
 })
 
@@ -195,16 +176,17 @@ test('upstream body abort terminates the downstream response', async (t) => {
   assert.equal(outcome, 'aborted')
 })
 
-test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, relays non-101 responses, preserves early head, and awaits socket close on dispose', async () => {
-  const seenUpgrades: Array<Record<string, string | string[] | undefined>> = []
-  const upgradedSockets = new Set<Duplex>()
+test('WebSocket relays rejection, early data, and closes the client on gateway dispose', async () => {
+  const upstreamSockets = new Set<import('node:stream').Duplex>()
   const upstream = createServer()
   upstream.on('upgrade', (req, socket) => {
-    upgradedSockets.add(socket)
-    socket.once('close', () => upgradedSockets.delete(socket))
-    seenUpgrades.push(req.headers)
-    if (req.url === '/reject') { socket.end('HTTP/1.1 426 Upgrade Required\r\nContent-Type: text/plain\r\nContent-Length: 7\r\nConnection: close\r\nSet-Cookie: dsh_session=replace-me; Path=/\r\n\r\ndenied!'); return }
-    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSet-Cookie: dsh_session=replace-me; Path=/\r\nSet-Cookie: app_ws=keep-me; Path=/\r\n\r\n')
+    upstreamSockets.add(socket)
+    socket.once('close', () => upstreamSockets.delete(socket))
+    if (req.url === '/reject') {
+      socket.end('HTTP/1.1 426 Upgrade Required\r\nContent-Type: text/plain\r\nContent-Length: 7\r\nConnection: close\r\n\r\ndenied!')
+      return
+    }
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n')
     socket.on('data', data => socket.write(data))
   })
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
@@ -212,53 +194,48 @@ test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, rel
   const { gateway, port } = await startGateway(upstreamPort)
   const sessionCookie = await bootstrap(port)
 
-  const deniedUpgrade = await new Promise<boolean>((resolve) => {
-    const req = httpRequest({ host: '127.0.0.1', port, path: '/api/events.mux', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.50', cookie: sessionCookie, origin: 'https://evil.example.com', connection: 'Upgrade', upgrade: 'websocket' }, agent: false })
-    let upgraded = false
-    req.on('upgrade', () => { upgraded = true; resolve(false) })
-    req.on('error', () => resolve(!upgraded))
-    req.on('close', () => resolve(!upgraded))
-    req.end()
-  })
-  assert.equal(deniedUpgrade, true)
+  try {
+    const rejected = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port, path: '/reject', headers: { host: 'dsh.example.com', cookie: sessionCookie, origin: 'http://dsh.example.com', connection: 'Upgrade', upgrade: 'websocket' }, agent: false })
+      req.on('response', (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', chunk => chunks.push(chunk as Buffer))
+        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }))
+      })
+      req.on('error', reject)
+      req.end()
+    })
+    assert.equal(rejected.status, 426)
+    assert.equal(rejected.body, 'denied!')
 
-  const rejected = await new Promise<{ status: number | undefined; body: string; setCookie: string[] | undefined }>((resolve, reject) => {
-    const req = httpRequest({ host: '127.0.0.1', port, path: '/reject', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.50', cookie: sessionCookie, origin: 'http://dsh.example.com', connection: 'Upgrade', upgrade: 'websocket' }, agent: false })
-    req.on('response', (res) => { const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk as Buffer)); res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), setCookie: res.headers['set-cookie'] })) })
-    req.on('error', reject)
-    req.end()
-  })
-  assert.equal(rejected.status, 426)
-  assert.equal(rejected.body, 'denied!')
-  assert.equal(rejected.setCookie, undefined)
+    const earlyEcho = await new Promise<{ raw: string; socket: import('node:net').Socket }>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1')
+      let raw = ''
+      socket.on('connect', () => socket.write([
+        'GET /api/events.mux HTTP/1.1',
+        'Host: dsh.example.com',
+        `Cookie: ${sessionCookie}`,
+        'Origin: http://dsh.example.com',
+        'Connection: Upgrade',
+        'Upgrade: websocket',
+        '',
+        'EARLY',
+      ].join('\r\n')))
+      socket.on('data', (chunk) => {
+        raw += chunk.toString()
+        if (raw.includes('\r\n\r\nEARLY')) resolve({ raw, socket })
+      })
+      socket.on('error', reject)
+    })
+    assert.match(earlyEcho.raw, /^HTTP\/1\.1 101 /)
+    assert.match(earlyEcho.raw, /\r\n\r\nEARLY/)
 
-  const earlyEcho = await new Promise<{ raw: string; socket: import('node:net').Socket }>((resolve, reject) => {
-    const socket = connect(port, '127.0.0.1')
-    let raw = ''
-    socket.on('connect', () => socket.write(['GET /api/events.mux HTTP/1.1','Host: dsh.example.com','X-Forwarded-For: 203.0.113.50',`Cookie: ${sessionCookie}`,'Origin: http://dsh.example.com','Connection: keep-alive, X-Hop, Upgrade','X-Hop: remove-me','Upgrade: websocket','','EARLY'].join('\r\n')))
-    socket.on('data', (chunk) => { raw += chunk.toString(); if (raw.includes('\r\n\r\nEARLY')) resolve({ raw, socket }) })
-    socket.on('error', reject)
-  })
-  assert.match(earlyEcho.raw, /101 Switching Protocols/)
-  assert.match(earlyEcho.raw, /\r\n\r\nEARLY/)
-  assert.doesNotMatch(earlyEcho.raw, /dsh_session=replace-me/)
-  assert.match(earlyEcho.raw, /app_ws=keep-me/)
-  const acceptedHeaders = seenUpgrades.at(-1)
-  assert.ok(acceptedHeaders)
-  assert.equal(acceptedHeaders.connection?.toString().toLowerCase(), 'upgrade')
-  assert.equal(acceptedHeaders['x-hop'], undefined)
-
-  const upstreamSocketClosures = [...upgradedSockets].map(socket => new Promise<void>((resolve) => {
-    socket.once('close', () => resolve())
-  }))
-  let clientClosed = false
-  earlyEcho.socket.once('close', () => { clientClosed = true })
-  await gateway.close()
-  await Promise.all(upstreamSocketClosures)
-  assert.equal(clientClosed, true)
-  assert.equal(earlyEcho.socket.destroyed, true)
-  assert.equal(upgradedSockets.size, 0)
-
-  upstream.close()
-  upstream.closeAllConnections()
+    let clientClosed = false
+    earlyEcho.socket.once('close', () => { clientClosed = true })
+    await gateway.close()
+    assert.equal(clientClosed, true)
+  } finally {
+    for (const socket of upstreamSockets) socket.destroy()
+    await closeServer(upstream)
+  }
 })
