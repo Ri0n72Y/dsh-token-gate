@@ -27,11 +27,11 @@ browser / cloudflared / caddy
 - `allowIps` 仍经过 Host fence：IP literal/loopback authority 可直接使用；命名 authority 需要列入 `trustedHosts`，防 DNS rebinding。
 - forwarded headers 默认全部不可信。只有 TCP peer 明确列入 `trustedProxies` 后，`realIpHeader=x-forwarded-for` 才参与客户端 IP 判定。
 - `X-Forwarded-For` 按右向左跳过可信代理链，避免客户端伪造左侧 XFF。插件不再内置 CDN/厂商专用真实 IP 头模式；需要真实客户端地址时统一由可信本地代理规范化为 XFF。
-- gateway session cookie 固定带 `HttpOnly; Secure; SameSite=Lax`，不会透传给 DSH；DSH 返回的同名 `Set-Cookie` 也会被过滤，避免覆盖 gateway 自己的 session。
+- gateway session cookie 固定带 `HttpOnly; SameSite=Lax`；只有可信入口通过 `X-Forwarded-Proto: https` 表明外部连接为 HTTPS 时才追加 `Secure`。gateway cookie 不会透传给 DSH，DSH 返回的同名 `Set-Cookie` 也会被过滤。
 - 外部 proxy identity headers 和 request/response hop-by-hop headers 不会透传。WebSocket 升级只重建必需的 `Connection: Upgrade` / `Upgrade` 头。
 - rate-limit identity 与 session store 都有硬上限，达到容量后 fail-closed。
 - malformed URL、单请求处理异常、上游响应中断会被收敛到当前请求/连接，不应导致 gateway 进程退出或留下长期悬挂的下游响应。
-- Cordis activation 会等待端口真正监听；`EADDRINUSE` 等失败会让 effect/fiber 失败。dispose/HMR 会等待监听与升级 socket 关闭。
+- Cordis activation 会等待端口真正监听；`EADDRINUSE` 等失败会让 effect/fiber 失败。dispose/HMR 只有在 listener 与当前 tracked client sockets（包括升级连接）真正关闭后才完成。
 
 404 响应固定为：
 
@@ -47,15 +47,21 @@ browser / cloudflared / caddy
 export DSH_AUTH_TOKEN='replace-with-a-long-random-secret'
 ```
 
-访问：
+远程 HTTPS 入口访问：
 
 ```text
 https://dsh.example.com/?token=replace-with-a-long-random-secret
 ```
 
+本机直接开发也可以使用：
+
+```text
+http://127.0.0.1:3081/?token=replace-with-a-long-random-secret
+```
+
 只有根路径的 `token` query 属于 gateway。成功后返回 `303`、写入 HttpOnly session，并跳转到去掉 `token` 的干净 URL。`/chat?token=...`、`/api/...?...token=...` 等参数继续由 DSH/插件自己处理。
 
-远程部署必须使用 HTTPS。gateway session cookie 固定带 `Secure`，因此不要把远程入口部署成明文 HTTP。首次 `?token=` 会进入 HTTP request line，因此反代/CDN access log 应关闭 query-string 记录或对 `token` 参数脱敏。响应带 `Referrer-Policy: no-referrer`。
+远程部署应使用 HTTPS，并确保直接连接 gateway 的可信反向代理设置 `X-Forwarded-Proto: https`；此时 session cookie 会自动带 `Secure`。本机直接 HTTP 访问不会附加 `Secure`，以兼容常规 loopback 开发。首次 `?token=` 会进入 HTTP request line，因此反代/CDN access log 应关闭 query-string 记录或对 `token` 参数脱敏。响应带 `Referrer-Policy: no-referrer`。
 
 ## 反向代理与真实客户端 IP
 
@@ -93,7 +99,7 @@ trustedHosts: ['dsh.example.com']
 | 字段 | 默认值 | 说明 |
 |---|---:|---|
 | `token` | unset | bootstrap token；优先于 `DSH_AUTH_TOKEN` |
-| `cookieName` | `dsh_session` | HttpOnly/Secure session cookie 名，非法 cookie token 会拒绝加载 |
+| `cookieName` | `dsh_session` | HttpOnly session cookie 名；可信 HTTPS 入口自动追加 `Secure`；非法 cookie token 会拒绝加载 |
 | `sessionTtlDays` | `30` | session 有效期（天） |
 | `sessionMax` | `4096` | 内存 session 最大数量 |
 | `rateMax` | `10` | 每客户端每窗口最大 bootstrap 尝试次数 |
@@ -113,7 +119,7 @@ trustedHosts: ['dsh.example.com']
 
 请求与响应的 hop-by-hop header 会按代理边界清理。WebSocket upgrade 会重新生成 `Connection: Upgrade`，而不是透传客户端 `Connection` 中声明的其他 hop token。upstream 如果拒绝升级并返回普通 HTTP（例如 426），gateway 会把该响应转回客户端；客户端在 upgrade header 后提前到达的 `head` 数据会等 upstream 101 后再写入升级 socket。
 
-如果 DSH 响应意外中断，gateway 会同时结束对应下游连接，避免客户端一直等待一个永远不会完整结束的响应。
+如果 DSH 响应意外中断，gateway 会同时结束对应下游连接，避免客户端一直等待一个永远不会完整结束的响应。插件卸载时，`gateway.close()` 会等待监听器和当前 tracked client sockets 都触发关闭后再完成，以符合 Cordis async disposer 的生命周期语义。
 
 ## 安装、测试与开发
 
@@ -131,7 +137,7 @@ dsh plugin --profile web add .
 dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
 ```
 
-CI 在 Linux 和 Windows 上执行 typecheck、覆盖率、build 与 tarball 检查；覆盖率门禁保持 lines 90%、branches 80%、functions 85%。
+CI 执行 Ubuntu Node 22、Ubuntu Node 24、Windows Node 22 三个 job，均包含 typecheck、覆盖率、build 与 tarball 检查；覆盖率门禁保持 lines 90%、branches 80%、functions 85%。
 
 ## License
 
