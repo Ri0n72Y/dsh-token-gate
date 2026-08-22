@@ -23,8 +23,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   else ctx.logger.info(`token-gate: access token loaded from ${token.source}`)
   const gateway = createGateway({ config, token: token.value, upstream, logger: ctx.logger })
   await ctx.effect(async () => {
-    await gateway.listen()
-    ctx.logger.info(`token-gate: listening on ${config.bind}:${String(config.port)}, proxying to ${upstream.host}:${String(upstream.port)}`)
+    try {
+      await gateway.listen()
+      ctx.logger.info(`token-gate: listening on ${config.bind}:${String(config.port)}, proxying to ${upstream.host}:${String(upstream.port)}`)
+    } catch (error) {
+      await gateway.close()
+      throw error
+    }
     return async () => { await gateway.close() }
   }, 'token-gate: gateway server')
 }
