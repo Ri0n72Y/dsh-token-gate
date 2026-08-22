@@ -126,7 +126,7 @@ trustedHosts: ['dsh.example.com']
 ```sh
 pnpm install
 pnpm run check
-npm pack --dry-run
+npm pack --dry-run --ignore-scripts
 dsh plugin --profile web add .
 ```
 
