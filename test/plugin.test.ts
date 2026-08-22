@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
 import { connect } from 'node:net'
 import type { AddressInfo, Socket } from 'node:net'
+import type { Duplex } from 'node:stream'
 import { Context, Service } from '@deepseek-ai/cordis'
 import * as tokenGate from '../src/index.ts'
 import type { Config } from '../src/config.ts'
@@ -75,7 +76,7 @@ test('Cordis effect returns an awaited gateway disposer', async () => {
 
 test('real Cordis disposal waits for upgraded sockets and releases the gateway port', async () => {
   const upstream = createServer()
-  let upstreamSocket: Socket | undefined
+  let upstreamSocket: Duplex | undefined
   upstream.on('upgrade', (_req, socket) => {
     upstreamSocket = socket
     socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n')
