@@ -1,8 +1,9 @@
 # dsh-token-gate — DSH Bundle patch.
 #
-# The gateway listens on its own port (default 0.0.0.0:3081) and requires the
-# injected DSH webServer to stay on 127.0.0.1. Point cloudflared/caddy at this
-# gateway port, never at the DSH port.
+# The gateway listens on its own loopback port by default (127.0.0.1:3081)
+# and requires the injected DSH webServer to stay on 127.0.0.1. Point a local
+# cloudflared/caddy instance at the gateway port, never at the DSH port. Set
+# config.bind to 0.0.0.0 only when direct network listening is intentional.
 #
 # Production is fail-closed: set DSH_AUTH_TOKEN in the DSH process environment
 # or provide config.token in a private patch layer. Do not commit secrets here.
