@@ -141,13 +141,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
     return token === null || token.length === 0 ? undefined : token
   }
 
-  function isBrowserTrusted(req: IncomingMessage): boolean {
-    const host = firstHeader(req.headers, 'host')
-    if (host === undefined) return false
-    const protocol = isSecure(req) ? 'https:' : 'http:'
-    const hostUrl = parseAuthority(host, protocol)
-    if (hostUrl === undefined) return false
-    if (firstHeader(req.headers, 'sec-fetch-site')?.trim().toLowerCase() === 'cross-site') return false
+  function hasTrustedOrigin(req: IncomingMessage, protocol: 'http:' | 'https:', hostUrl: URL): boolean {
     const origin = firstHeader(req.headers, 'origin')
     if (origin === undefined) return true
     try {
@@ -158,6 +152,32 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
     } catch {
       return false
     }
+  }
+
+  function isUserActivatedTopLevelNavigation(req: IncomingMessage): boolean {
+    return firstHeader(req.headers, 'sec-fetch-mode')?.trim().toLowerCase() === 'navigate'
+      && firstHeader(req.headers, 'sec-fetch-dest')?.trim().toLowerCase() === 'document'
+      && firstHeader(req.headers, 'sec-fetch-user')?.trim() === '?1'
+  }
+
+  function isBrowserBoundaryTrusted(req: IncomingMessage, bootstrap: boolean): boolean {
+    const host = firstHeader(req.headers, 'host')
+    if (host === undefined) return false
+    const protocol = isSecure(req) ? 'https:' : 'http:'
+    const hostUrl = parseAuthority(host, protocol)
+    if (hostUrl === undefined) return false
+
+    const site = firstHeader(req.headers, 'sec-fetch-site')?.trim().toLowerCase()
+    if (site === 'cross-site' && !(bootstrap && isUserActivatedTopLevelNavigation(req))) return false
+    return hasTrustedOrigin(req, protocol, hostUrl)
+  }
+
+  function isBrowserTrusted(req: IncomingMessage): boolean {
+    return isBrowserBoundaryTrusted(req, false)
+  }
+
+  function isBootstrapTrusted(req: IncomingMessage): boolean {
+    return isBrowserBoundaryTrusted(req, true)
   }
 
   function isAllowlistAuthorityTrusted(req: IncomingMessage): boolean {
@@ -174,7 +194,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
       if (requestUrl(req) === undefined) return 'deny'
       const token = bootstrapToken(req)
       if (token !== undefined) {
-        return requestAuthority(req) !== undefined && isBrowserTrusted(req) ? 'bootstrap' : 'deny'
+        return requestAuthority(req) !== undefined && isBootstrapTrusted(req) ? 'bootstrap' : 'deny'
       }
       const authority = requestAuthority(req)
       if (authority === undefined || !isBrowserTrusted(req)) return 'deny'
