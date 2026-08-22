@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
+import type { Duplex } from 'node:stream'
 import type { Config } from './config.ts'
 import { createAuthService } from './auth.ts'
 import { createAccessPolicy } from './access.ts'
@@ -35,7 +36,7 @@ function notFound(res: ServerResponse): void {
   res.end(NOT_FOUND_BODY)
 }
 
-function rawNotFound(socket: Socket): void {
+function rawNotFound(socket: Duplex): void {
   if (socket.destroyed || !socket.writable) {
     socket.destroy()
     return
