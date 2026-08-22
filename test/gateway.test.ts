@@ -1,10 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
+import type { Server } from 'node:http'
 import { connect } from 'node:net'
 import type { AddressInfo } from 'node:net'
 import { createGateway } from '../src/gateway.ts'
 import type { Config } from '../src/config.ts'
+import type { Gateway } from '../src/gateway.ts'
 
 const TOKEN = 'test-token-0123456789abcdef'
 const logs = { info() {}, warn() {}, error() {} }
@@ -48,6 +50,19 @@ async function startGateway(upstreamPort: number, config: Config = baseConfig())
   return { gateway, port: (gateway.server.address() as AddressInfo).port }
 }
 
+async function closeServer(server: Server): Promise<void> {
+  if (!server.listening) return
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve())
+    server.closeAllConnections()
+  })
+}
+
+async function closeFixture(gateway: Gateway, upstream: Server): Promise<void> {
+  await gateway.close()
+  await closeServer(upstream)
+}
+
 async function bootstrap(port: number, headers: Record<string, string> = {}): Promise<string> {
   const response = await request(port, '/?token=' + TOKEN, { headers })
   assert.equal(response.status, 303)
@@ -69,10 +84,9 @@ test('opaque bootstrap, authority-bound session, browser fence, and sanitized pr
     res.end('DSH APP')
   })
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
-  t.after(() => new Promise<void>(resolve => upstream.close(() => resolve())))
   const upstreamPort = (upstream.address() as AddressInfo).port
   const { gateway, port } = await startGateway(upstreamPort)
-  t.after(() => gateway.close())
+  t.after(() => closeFixture(gateway, upstream))
 
   const malformed = await rawRequest(port, 'GET //[bad HTTP/1.1\r\nHost: dsh.example.com\r\nConnection: close\r\n\r\n')
   assert.match(malformed, /^HTTP\/1\.1 404 /)
@@ -116,10 +130,9 @@ test('opaque bootstrap, authority-bound session, browser fence, and sanitized pr
 test('session cookie is Secure only when the trusted proxy reports HTTPS', async (t) => {
   const upstream = createServer((_req, res) => res.end('ok'))
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
-  t.after(() => new Promise<void>(resolve => upstream.close(() => resolve())))
   const upstreamPort = (upstream.address() as AddressInfo).port
   const { gateway, port } = await startGateway(upstreamPort)
-  t.after(() => gateway.close())
+  t.after(() => closeFixture(gateway, upstream))
 
   const local = await request(port, '/?token=' + TOKEN, { headers: { 'x-forwarded-for': '203.0.113.20' } })
   assert.equal(local.status, 303)
@@ -138,10 +151,9 @@ test('allowlist uses only the configured trusted X-Forwarded-For chain', async (
   let hits = 0
   const upstream = createServer((_req, res) => { hits += 1; res.end('ok') })
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
-  t.after(() => new Promise<void>(resolve => upstream.close(() => resolve())))
   const upstreamPort = (upstream.address() as AddressInfo).port
   const { gateway, port } = await startGateway(upstreamPort, baseConfig({ allowIps: ['10.0.0.0/8'], trustedHosts: ['dsh.example.com'] }))
-  t.after(() => gateway.close())
+  t.after(() => closeFixture(gateway, upstream))
   assert.equal((await request(port, '/', { headers: { 'cf-connecting-ip': '10.1.2.3', 'x-forwarded-for': '203.0.113.9' } })).status, 404)
   assert.equal((await request(port, '/', { headers: { 'x-forwarded-for': '10.1.2.3' } })).status, 200)
   assert.equal((await request(port, '/', { headers: { host: 'attacker.example.com', 'x-forwarded-for': '10.1.2.3' } })).status, 404)
@@ -155,10 +167,9 @@ test('upstream body abort terminates the downstream response', async (t) => {
     setImmediate(() => res.destroy())
   })
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
-  t.after(() => new Promise<void>(resolve => upstream.close(() => resolve())))
   const upstreamPort = (upstream.address() as AddressInfo).port
   const { gateway, port } = await startGateway(upstreamPort)
-  t.after(() => gateway.close())
+  t.after(() => closeFixture(gateway, upstream))
   const sessionCookie = await bootstrap(port)
 
   const outcome = await new Promise<'aborted' | 'ended'>((resolve, reject) => {
@@ -232,5 +243,5 @@ test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, rel
   assert.equal(clientClosed, true)
   assert.equal(earlyEcho.socket.destroyed, true)
 
-  upstream.close(); upstream.closeAllConnections()
+  await closeServer(upstream)
 })
