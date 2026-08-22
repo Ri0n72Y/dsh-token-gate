@@ -2,11 +2,13 @@
 # Replace /ABSOLUTE/PATH/TO and run:
 #   dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
 #
-# Dev mode explicitly permits a generated token and binds it to loopback only.
+# Dev mode explicitly permits a generated token, binds to loopback only, and
+# disables Secure cookies so direct http://127.0.0.1 access works locally.
 
 - insert:
     - id: token-gate
       name: '/ABSOLUTE/PATH/TO/dsh-token-gate/src/index.ts'
       config:
         bind: '127.0.0.1'
+        secureCookie: false
         allowGeneratedToken: true
