@@ -26,6 +26,7 @@ export interface GatewayOptions {
 
 function notFound(res: ServerResponse): void {
   if (res.destroyed) return
+  res.sendDate = false
   res.writeHead(404, {
     'Content-Type': 'text/plain; charset=utf-8',
     'Content-Length': NOT_FOUND_LENGTH,
