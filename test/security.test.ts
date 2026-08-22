@@ -10,6 +10,7 @@ import type { Config } from '../src/config.ts'
 const baseConfig: Config = {
   token: 'secret',
   cookieName: 'dsh_session',
+  secureCookie: true,
   sessionTtlDays: 30,
   sessionMax: 16,
   rateMax: 10,
@@ -48,7 +49,7 @@ test('upstream must remain loopback-only', () => {
   assert.throws(() => resolveUpstream({ host: '0.0.0.0', port: 3080 }), /must bind to 127\.0\.0\.1/)
 })
 
-test('bootstrap is reserved only on the root path', () => {
+test('bootstrap is reserved only on the literal root request target', () => {
   const auth = createAuthService(baseConfig, 'secret')
   const access = createAccessPolicy(baseConfig, auth)
   const root = fakeReq('203.0.113.10', 'dsh.example.com', { url: '/?x=1&token=secret&y=2' })
@@ -59,26 +60,36 @@ test('bootstrap is reserved only on the root path', () => {
   const appPath = fakeReq('203.0.113.10', 'dsh.example.com', { url: '/chat?token=app-value' })
   assert.equal(access.bootstrapToken(appPath), undefined)
   assert.equal(access.decide(appPath), 'deny')
+
+  const normalizedRoot = fakeReq('203.0.113.10', 'dsh.example.com', { url: '/%2e%2e/?token=secret' })
+  assert.equal(access.bootstrapToken(normalizedRoot), undefined)
+  assert.equal(access.decide(normalizedRoot), 'deny')
+})
+
+test('malformed and non-origin-form request targets fail closed', () => {
+  const auth = createAuthService(baseConfig, 'secret')
+  const access = createAccessPolicy(baseConfig, auth)
+  assert.equal(access.decide(fakeReq('203.0.113.10', 'dsh.example.com', { url: '//[bad' })), 'deny')
+  assert.equal(access.decide(fakeReq('203.0.113.10', 'dsh.example.com', { url: 'http://evil.example/' })), 'deny')
 })
 
 test('session is bound to bootstrap authority and browser markers stay same-origin', () => {
   const auth = createAuthService(baseConfig, 'secret')
   const access = createAccessPolicy(baseConfig, auth)
   const sid = auth.createSession('dsh.example.com')
-  assert.ok(sid)
 
   const sameOrigin = fakeReq('203.0.113.10', 'dsh.example.com', {
-    headers: { host: 'dsh.example.com', cookie: `dsh_session=${sid}`, origin: 'https://dsh.example.com' },
+    headers: { host: 'dsh.example.com', cookie: `dsh_session=${sid}`, origin: 'http://dsh.example.com' },
   })
   assert.equal(access.decide(sameOrigin), 'allow')
 
   const otherHost = fakeReq('203.0.113.10', 'other.example.com', {
-    headers: { host: 'other.example.com', cookie: `dsh_session=${sid}`, origin: 'https://other.example.com' },
+    headers: { host: 'other.example.com', cookie: `dsh_session=${sid}`, origin: 'http://other.example.com' },
   })
   assert.equal(access.decide(otherHost), 'deny')
 
   const badOrigin = fakeReq('203.0.113.10', 'dsh.example.com', {
-    headers: { host: 'dsh.example.com', cookie: `dsh_session=${sid}`, origin: 'https://evil.example.com' },
+    headers: { host: 'dsh.example.com', cookie: `dsh_session=${sid}`, origin: 'http://evil.example.com' },
   })
   assert.equal(access.decide(badOrigin), 'deny')
 
@@ -88,7 +99,29 @@ test('session is bound to bootstrap authority and browser markers stay same-orig
   assert.equal(access.decide(crossSite), 'deny')
 })
 
-test('allowlisted IPs still pass a Host fence', () => {
+test('bootstrap also passes the browser trust fence', () => {
+  const config = { ...baseConfig, trustedProxies: ['127.0.0.1/32'] }
+  const auth = createAuthService(config, 'secret')
+  const access = createAccessPolicy(config, auth)
+  const crossSite = fakeReq('127.0.0.1', 'dsh.example.com', {
+    url: '/?token=secret',
+    headers: {
+      host: 'dsh.example.com',
+      'x-forwarded-proto': 'https',
+      origin: 'https://evil.example.com',
+      'sec-fetch-site': 'cross-site',
+    },
+  })
+  assert.equal(access.decide(crossSite), 'deny')
+
+  const wrongScheme = fakeReq('127.0.0.1', 'dsh.example.com', {
+    url: '/?token=secret',
+    headers: { host: 'dsh.example.com', 'x-forwarded-proto': 'https', origin: 'http://dsh.example.com' },
+  })
+  assert.equal(access.decide(wrongScheme), 'deny')
+})
+
+test('allowlisted IPs still pass a scheme-aware Host fence', () => {
   const noHosts = { ...baseConfig, allowIps: ['203.0.113.0/24'] }
   const noHostsAuth = createAuthService(noHosts, 'secret')
   const noHostsAccess = createAccessPolicy(noHosts, noHostsAuth)
@@ -100,9 +133,26 @@ test('allowlisted IPs still pass a Host fence', () => {
   const namedAccess = createAccessPolicy(named, namedAuth)
   assert.equal(namedAccess.decide(fakeReq('203.0.113.5', 'dsh.example.com')), 'allow')
   assert.throws(() => createAccessPolicy({ ...named, trustedHosts: ['dsh.example.com/path'] }, namedAuth))
+
+  const httpsBase = {
+    ...baseConfig,
+    allowIps: ['203.0.113.0/24'],
+    trustedProxies: ['127.0.0.1/32'],
+    trustedHosts: ['dsh.example.com:443'],
+  }
+  const httpsAuth = createAuthService(httpsBase, 'secret')
+  const httpsAccess = createAccessPolicy(httpsBase, httpsAuth)
+  const httpsReq = fakeReq('127.0.0.1', 'dsh.example.com', {
+    headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.5', 'x-forwarded-proto': 'https' },
+  })
+  assert.equal(httpsAccess.decide(httpsReq), 'allow')
+
+  const wrongPortConfig = { ...httpsBase, trustedHosts: ['dsh.example.com:80'] }
+  const wrongPort = createAccessPolicy(wrongPortConfig, createAuthService(wrongPortConfig, 'secret'))
+  assert.equal(wrongPort.decide(httpsReq), 'deny')
 })
 
-test('real client IP uses an explicit trusted-proxy chain and ignores CF spoofing by default', () => {
+test('real client IP uses an explicit trusted-proxy chain', () => {
   const config = {
     ...baseConfig,
     allowIps: ['10.0.0.0/8'],
@@ -139,31 +189,22 @@ test('real client IP uses an explicit trusted-proxy chain and ignores CF spoofin
   assert.equal(access.clientIp(malformed), '')
 })
 
-test('CF real-IP mode is explicit and validates the header', () => {
-  const config = {
-    ...baseConfig,
-    trustedProxies: ['127.0.0.1/32'],
-    realIpHeader: 'cf-connecting-ip' as const,
-  }
-  const auth = createAuthService(config, 'secret')
-  const access = createAccessPolicy(config, auth)
-  assert.equal(access.clientIp(fakeReq('127.0.0.1', 'dsh.example.com', {
-    headers: { host: 'dsh.example.com', 'cf-connecting-ip': '203.0.113.8' },
-  })), '203.0.113.8')
-  assert.equal(access.clientIp(fakeReq('127.0.0.1', 'dsh.example.com', {
-    headers: { host: 'dsh.example.com', 'cf-connecting-ip': 'fake' },
-  })), '')
-})
-
-test('rate limiter and session store have hard cardinality bounds', () => {
+test('rate limiter and session store stay bounded without global capacity lockout', () => {
   const config = { ...baseConfig, rateMaxKeys: 2, rateMax: 10, sessionMax: 1 }
   const auth = createAuthService(config, 'secret')
   assert.equal(auth.authorizeBootstrap('a', 'wrong'), false)
   assert.equal(auth.authorizeBootstrap('b', 'wrong'), false)
-  assert.equal(auth.authorizeBootstrap('c', 'secret'), false)
+  assert.equal(auth.authorizeBootstrap('c', 'secret'), true)
 
-  assert.ok(auth.createSession('a.example'))
-  assert.equal(auth.createSession('b.example'), undefined)
+  const first = auth.createSession('a.example')
+  const second = auth.createSession('b.example')
+  assert.notEqual(first, second)
+  assert.equal(auth.hasRequestSession(fakeReq('203.0.113.1', 'a.example', {
+    headers: { host: 'a.example', cookie: `dsh_session=${first}` },
+  }), 'a.example'), false)
+  assert.equal(auth.hasRequestSession(fakeReq('203.0.113.1', 'b.example', {
+    headers: { host: 'b.example', cookie: `dsh_session=${second}` },
+  }), 'b.example'), true)
 })
 
 test('invalid cookie names fail closed', () => {
@@ -200,13 +241,13 @@ test('network normalization and exact address matching cover mapped and brackete
   assert.throws(() => new IpSet(['not-an-ip']))
 })
 
-test('proxy identity and response hop headers are stripped in unit paths', async () => {
+test('proxy identity, gateway cookies, and hop headers are stripped in unit paths', async () => {
   const { forwardHeaders, sanitizeResponseHeaders } = await import('../src/proxy.ts')
   const auth = createAuthService(baseConfig, 'secret')
   const req = fakeReq('203.0.113.1', 'dsh.example.com', {
     headers: {
       host: 'dsh.example.com',
-      origin: 'https://dsh.example.com',
+      origin: 'http://dsh.example.com',
       cookie: 'dsh_session=missing',
       connection: 'keep-alive, x-hop',
       'x-hop': 'remove',
@@ -224,7 +265,7 @@ test('proxy identity and response hop headers are stripped in unit paths', async
   assert.equal(normal.origin, 'http://127.0.0.1:3080')
 
   const upgrade = forwardHeaders(req, { host: '127.0.0.1', port: 3080 }, auth, true)
-  assert.equal(upgrade.connection, 'keep-alive, x-hop')
+  assert.equal(upgrade.connection, 'Upgrade')
   assert.equal(upgrade.upgrade, 'websocket')
 
   const response = sanitizeResponseHeaders({
@@ -232,20 +273,23 @@ test('proxy identity and response hop headers are stripped in unit paths', async
     'x-response-hop': 'remove',
     'content-type': 'text/plain',
     trailer: 'x-trailer',
-  })
-  assert.deepEqual(response, { 'content-type': 'text/plain' })
+    'set-cookie': ['dsh_session=overwrite; Path=/', 'app=1; Path=/'],
+  }, auth)
+  assert.deepEqual(response, { 'content-type': 'text/plain', 'set-cookie': ['app=1; Path=/'] })
 })
 
-test('auth rate count, cookie stripping, and non-secure cookie branches are bounded', () => {
+test('auth rate count, cookie stripping, and Secure-cookie defaults are bounded', () => {
   const config = { ...baseConfig, rateMax: 1, rateMaxKeys: 2 }
   const auth = createAuthService(config, 'secret')
   assert.equal(auth.authorizeBootstrap('a', 'wrong'), false)
   assert.equal(auth.authorizeBootstrap('a', 'secret'), false)
   const id = auth.createSession('dsh.example.com')
-  assert.ok(id)
-  assert.doesNotMatch(auth.sessionCookie(id, false), /Secure/)
+  assert.match(auth.sessionCookie(id), /Secure/)
+  const devAuth = createAuthService({ ...baseConfig, secureCookie: false }, 'secret')
+  assert.doesNotMatch(devAuth.sessionCookie(devAuth.createSession('dsh.example.com')), /Secure/)
   assert.equal(auth.stripSessionCookie(`dsh_session=${id}`), undefined)
   assert.equal(auth.stripSessionCookie(`app=1; dsh_session=${id}; app2=2`), 'app=1; app2=2')
+  assert.deepEqual(auth.stripSessionSetCookies(['dsh_session=x; Path=/', 'app=1']), ['app=1'])
 })
 
 test('browser trust rejects malformed and opaque origins and supports explicit no-forwarded-IP mode', () => {
