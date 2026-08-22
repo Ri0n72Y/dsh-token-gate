@@ -135,6 +135,7 @@ export function proxyHttp(
     method: req.method,
     path: req.url,
     headers: forwardHeaders(req, target, auth, false),
+    agent: false,
   }, (upstreamRes) => {
     if (res.destroyed) {
       upstreamRes.destroy()
@@ -179,6 +180,7 @@ export function proxyUpgrade(
     method: req.method,
     path: req.url,
     headers: forwardHeaders(req, target, auth, true),
+    agent: false,
   })
 
   upstream.on('upgrade', (upstreamRes: IncomingMessage, upstreamSocket: Duplex, upstreamHead: Buffer) => {
