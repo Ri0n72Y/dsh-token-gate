@@ -240,14 +240,15 @@ test('proxy identity, session cookies, and response hop headers are stripped in 
   })
 })
 
-test('auth rate count, cookie stripping, and secure session cookie branches are bounded', () => {
+test('auth rate count, cookie stripping, and secure-cookie selection are bounded', () => {
   const config = { ...baseConfig, rateMax: 1, rateMaxKeys: 2 }
   const auth = createAuthService(config, 'secret')
   assert.equal(auth.authorizeBootstrap('a', 'wrong'), false)
   assert.equal(auth.authorizeBootstrap('a', 'secret'), false)
   const id = auth.createSession('dsh.example.com')
   assert.ok(id)
-  assert.match(auth.sessionCookie(id), /; Secure;/)
+  assert.doesNotMatch(auth.sessionCookie(id, false), /; Secure/)
+  assert.match(auth.sessionCookie(id, true), /; Secure/)
   assert.equal(auth.stripSessionCookie(`dsh_session=${id}`), undefined)
   assert.equal(auth.stripSessionCookie(`app=1; dsh_session=${id}; app2=2`), 'app=1; app2=2')
   assert.equal(auth.isSessionSetCookie(`dsh_session=${id}; Path=/`), true)
