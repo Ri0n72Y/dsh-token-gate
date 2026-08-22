@@ -40,7 +40,9 @@ Treat the token like a host-control secret:
 
 Before any internal Host/Origin rewrite, the gateway validates the external authority, `Origin`, and Fetch Metadata. Sessions are bound to the external authority used during bootstrap. IP allowlist access passes the same browser/Host fence.
 
-Bootstrap is accepted only on the literal root request target `/?token=...`; malformed, absolute-form, scheme-relative, cross-site, and cross-origin bootstrap requests fail closed.
+Ordinary authenticated HTTP and WebSocket requests reject explicit `Sec-Fetch-Site: cross-site` traffic. Bootstrap is accepted only on the literal root request target `/?token=...`. To preserve clickable share links, bootstrap has one narrow Fetch-Metadata exception: a cross-site request may proceed to token verification only when it is a user-activated top-level document navigation (`Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`, `Sec-Fetch-User: ?1`) and carries no conflicting `Origin`.
+
+Cross-site fetch/XHR, iframe navigation, non-user-activated navigation, cross-origin `Origin`, malformed request targets, absolute-form targets, and scheme-relative targets fail closed. The exception does not grant access by itself; the bootstrap token must still validate before a session is created.
 
 ## HTTPS and cookies
 
