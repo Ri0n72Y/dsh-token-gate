@@ -26,7 +26,7 @@ caddy / cloudflared / reverse proxy
 - 插件启动时检查 `webServer.host`；DSH 如果监听 `0.0.0.0` 会直接拒绝启动，避免绕过 gateway 直连 DSH。
 - gateway 默认监听 `127.0.0.1`。生产环境应由 HTTPS reverse proxy 暴露 gateway；只有明确的私网部署才应主动改为 `0.0.0.0`。
 - session 绑定首次成功 bootstrap 的外部 authority；同一 cookie 换 Host 后不会继续生效。
-- bootstrap 与普通 HTTP/WebSocket 请求都在内部改写前检查 `Host`、`Origin` 与 Fetch Metadata；显式 `Sec-Fetch-Site: cross-site` 会拒绝。
+- bootstrap 与普通 HTTP/WebSocket 请求都在内部改写前检查 `Host`、`Origin` 与 Fetch Metadata。普通请求显式 `Sec-Fetch-Site: cross-site` 一律拒绝；bootstrap 仅额外允许用户触发的顶层 document navigation，以保留可点击分享链接。
 - `allowIps` 仍经过 browser/Host fence；IP literal/loopback authority 可直接使用，命名 authority 需要列入 `trustedHosts`。
 - forwarded headers 默认全部不可信。只有 TCP peer 明确列入 `trustedProxies` 后，XFF 与 `X-Forwarded-Proto` 才参与客户端身份和外部 scheme 判断。
 - `X-Forwarded-For` 从最右侧开始跳过可信代理链；缺失或含非法 IP 时 fail closed，不回退成可信代理自身地址。
@@ -66,6 +66,8 @@ https://dsh.example.com/?token=replace-with-a-long-random-secret
 ```
 
 只有字面根路径 `/?token=...` 属于 gateway bootstrap。`/%2e%2e/?token=...`、absolute-form request-target、`/chat?token=...`、`/api/...?...token=...` 等不会被当作 bootstrap。
+
+分享链接可以从其他站点由用户点击打开：当浏览器明确标记为 `navigate + document + Sec-Fetch-User: ?1` 的顶层导航时，gateway 允许请求继续进入 token 校验。cross-site fetch/XHR、iframe、无用户触发的导航以及带异源 `Origin` 的 bootstrap 仍会得到 404。无论 Fetch Metadata 如何，只有正确 token 才能创建 session。
 
 成功后返回 `303`、写入 HttpOnly session，并跳转到去掉 `token` 的干净 URL。
 
@@ -157,7 +159,7 @@ dsh plugin --profile web add .
 dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
 ```
 
-CI 在 Linux 和 Windows 上执行 typecheck、覆盖率、build 与 tarball 检查；覆盖率门禁保持 lines 90%、branches 80%、functions 85%。测试包含真实 Cordis `Context/Fiber` lifecycle、malformed raw HTTP、proxy abort 和 WebSocket regression。
+CI 在 Linux 和 Windows 上执行 typecheck、覆盖率、build 与 tarball 检查；覆盖率门禁保持 lines 90%、branches 80%、functions 85%。测试包含真实 Cordis `Context/Fiber` lifecycle、malformed raw HTTP、proxy abort、share-link bootstrap 和 WebSocket regression。
 
 ## License
 
