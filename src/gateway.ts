@@ -59,7 +59,7 @@ export function createGateway(options: GatewayOptions): Gateway {
   const access = createAccessPolicy(config, auth)
   const sockets = new Set<Socket>()
 
-  function handleRequest(req: IncomingMessage, res: ServerResponse): void {
+  function handleRequest(req: IncomingMessage, res: ServerResponse, sendContinue = false): void {
     try {
       const decision = access.decide(req)
       if (decision === 'deny') {
@@ -89,6 +89,7 @@ export function createGateway(options: GatewayOptions): Gateway {
         res.end()
         return
       }
+      if (sendContinue) res.writeContinue()
       proxyHttp(req, res, upstream, auth, logger)
     } catch (error) {
       logger.warn('token-gate: rejected request after internal error: %s', String(error))
@@ -103,6 +104,18 @@ export function createGateway(options: GatewayOptions): Gateway {
     sockets.add(socket)
     socket.on('close', () => sockets.delete(socket))
     socket.on('error', (error) => logger.warn('token-gate: client socket error: %s', String(error)))
+  })
+
+  server.on('checkContinue', (req, res) => {
+    handleRequest(req, res, true)
+  })
+
+  server.on('checkExpectation', (_req, res) => {
+    notFound(res)
+  })
+
+  server.on('connect', (_req, socket) => {
+    rawNotFound(socket)
   })
 
   server.on('clientError', (_error, socket) => {
