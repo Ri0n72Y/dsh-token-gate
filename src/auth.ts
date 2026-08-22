@@ -17,7 +17,7 @@ export interface AuthService {
   hasRequestSession(req: IncomingMessage, authority: string): boolean
   authorizeBootstrap(clientKey: string, submitted: string): boolean
   createSession(authority: string): string | undefined
-  sessionCookie(id: string): string
+  sessionCookie(id: string, secure: boolean): string
   stripSessionCookie(raw: string): string | undefined
   isSessionSetCookie(raw: string): boolean
 }
@@ -116,8 +116,9 @@ export function createAuthService(config: Config, token: string): AuthService {
       return id
     },
 
-    sessionCookie(id) {
-      return `${config.cookieName}=${id}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${Math.floor(ttlMs / 1000)}`
+    sessionCookie(id, secure) {
+      const base = `${config.cookieName}=${id}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(ttlMs / 1000)}`
+      return secure ? `${base}; Secure` : base
     },
 
     stripSessionCookie(raw) {
