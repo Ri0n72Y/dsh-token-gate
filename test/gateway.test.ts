@@ -4,6 +4,7 @@ import { createServer, request as httpRequest } from 'node:http'
 import type { Server } from 'node:http'
 import { connect } from 'node:net'
 import type { AddressInfo } from 'node:net'
+import type { Duplex } from 'node:stream'
 import { createGateway } from '../src/gateway.ts'
 import type { Config } from '../src/config.ts'
 import type { Gateway } from '../src/gateway.ts'
@@ -189,8 +190,11 @@ test('upstream body abort terminates the downstream response', async (t) => {
 
 test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, relays non-101 responses, preserves early head, and awaits socket close on dispose', async () => {
   const seenUpgrades: Array<Record<string, string | string[] | undefined>> = []
+  const upgradedSockets = new Set<Duplex>()
   const upstream = createServer()
   upstream.on('upgrade', (req, socket) => {
+    upgradedSockets.add(socket)
+    socket.once('close', () => upgradedSockets.delete(socket))
     seenUpgrades.push(req.headers)
     if (req.url === '/reject') { socket.end('HTTP/1.1 426 Upgrade Required\r\nContent-Type: text/plain\r\nContent-Length: 7\r\nConnection: close\r\nSet-Cookie: dsh_session=replace-me; Path=/\r\n\r\ndenied!'); return }
     socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSet-Cookie: dsh_session=replace-me; Path=/\r\nSet-Cookie: app_ws=keep-me; Path=/\r\n\r\n')
@@ -243,5 +247,10 @@ test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, rel
   assert.equal(clientClosed, true)
   assert.equal(earlyEcho.socket.destroyed, true)
 
-  await closeServer(upstream)
+  const serverClosed = new Promise<void>(resolve => upstream.close(() => resolve()))
+  const socketsClosed = [...upgradedSockets].map(socket => new Promise<void>((resolve) => {
+    socket.once('close', () => resolve())
+    socket.destroy()
+  }))
+  await Promise.all([serverClosed, ...socketsClosed])
 })
