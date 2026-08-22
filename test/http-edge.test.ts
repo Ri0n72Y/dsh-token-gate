@@ -73,13 +73,31 @@ function bootstrap(port: number): Promise<string> {
   })
 }
 
-test('unauthenticated Expect and CONNECT paths keep the opaque 404 surface', async (t) => {
+test('unauthenticated parser, Expect, and CONNECT paths are byte-equivalent opaque 404s', async (t) => {
   const upstream = createServer((_req, res) => res.end('unexpected'))
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   t.after(() => new Promise<void>(resolve => upstream.close(() => resolve())))
 
   const { gateway, port } = await startGateway((upstream.address() as AddressInfo).port)
   t.after(() => gateway.close())
+
+  const ordinary = await rawExchange(port, [
+    'GET / HTTP/1.1',
+    'Host: dsh.example.com',
+    '',
+    '',
+  ].join('\r\n'))
+  assert.match(ordinary, /^HTTP\/1\.1 404 Not Found/)
+  assert.doesNotMatch(ordinary, /\r\nDate:/i)
+
+  const parserError = await rawExchange(port, [
+    'GET / HTTP/1.1',
+    'Host: dsh.example.com',
+    'Broken Header',
+    '',
+    '',
+  ].join('\r\n'))
+  assert.equal(parserError, ordinary)
 
   const continueResponse = await rawExchange(port, [
     'POST / HTTP/1.1',
@@ -89,7 +107,7 @@ test('unauthenticated Expect and CONNECT paths keep the opaque 404 surface', asy
     '',
     '',
   ].join('\r\n'))
-  assert.match(continueResponse, /^HTTP\/1\.1 404/)
+  assert.equal(continueResponse, ordinary)
   assert.doesNotMatch(continueResponse, /100 Continue/i)
 
   const unsupported = await rawExchange(port, [
@@ -99,7 +117,7 @@ test('unauthenticated Expect and CONNECT paths keep the opaque 404 surface', asy
     '',
     '',
   ].join('\r\n'))
-  assert.match(unsupported, /^HTTP\/1\.1 404/)
+  assert.equal(unsupported, ordinary)
   assert.doesNotMatch(unsupported, /417 Expectation Failed/i)
 
   const connectResponse = await rawExchange(port, [
@@ -108,7 +126,7 @@ test('unauthenticated Expect and CONNECT paths keep the opaque 404 surface', asy
     '',
     '',
   ].join('\r\n'))
-  assert.match(connectResponse, /^HTTP\/1\.1 404/)
+  assert.equal(connectResponse, ordinary)
 })
 
 test('authorized 100-continue is terminated at the gateway and not forwarded upstream', async (t) => {
