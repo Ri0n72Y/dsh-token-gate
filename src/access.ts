@@ -16,8 +16,12 @@ export interface AccessPolicy {
   isBrowserTrusted(req: IncomingMessage): boolean
 }
 
-function requestUrl(req: IncomingMessage): URL {
-  return new URL(req.url ?? '/', 'http://token-gate.invalid')
+function requestUrl(req: IncomingMessage): URL | undefined {
+  try {
+    return new URL(req.url ?? '/', 'http://token-gate.invalid')
+  } catch {
+    return undefined
+  }
 }
 
 function parseAuthority(authority: string, scheme = 'http:'): URL | undefined {
@@ -88,10 +92,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
     const peer = peerIp(req)
     if (peer.length === 0) return ''
     if (!trustedProxies.has(peer) || config.realIpHeader === 'none') return peer
-    if (config.realIpHeader === 'x-forwarded-for') return forwardedForClient(req, peer)
-    const raw = firstHeader(req.headers, 'cf-connecting-ip')
-    const value = normalizeIp(raw)
-    return isIP(value) === 0 ? '' : value
+    return forwardedForClient(req, peer)
   }
 
   function isSecure(req: IncomingMessage): boolean {
@@ -112,7 +113,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
 
   function bootstrapToken(req: IncomingMessage): string | undefined {
     const url = requestUrl(req)
-    if (url.pathname !== '/') return undefined
+    if (url === undefined || url.pathname !== '/') return undefined
     const token = url.searchParams.get('token')
     return token === null || token.length === 0 ? undefined : token
   }
@@ -144,7 +145,11 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
 
   return {
     decide(req) {
-      if (bootstrapToken(req) !== undefined) return 'bootstrap'
+      if (requestUrl(req) === undefined) return 'deny'
+      if (bootstrapToken(req) !== undefined) {
+        const authority = requestAuthority(req)
+        return authority !== undefined && isBrowserTrusted(req) ? 'bootstrap' : 'deny'
+      }
       const authority = requestAuthority(req)
       if (authority === undefined || !isBrowserTrusted(req)) return 'deny'
       if (auth.hasRequestSession(req, authority)) return 'allow'
@@ -154,6 +159,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
     bootstrapToken,
     cleanBootstrapLocation(req) {
       const url = requestUrl(req)
+      if (url === undefined) return '/'
       url.searchParams.delete('token')
       const query = url.searchParams.toString()
       return `${url.pathname}${query.length > 0 ? `?${query}` : ''}`
