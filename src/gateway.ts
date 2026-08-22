@@ -67,7 +67,7 @@ export function createGateway(options: GatewayOptions): Gateway {
         return
       }
       if (decision === 'bootstrap') {
-        if ((req.method ?? 'GET') !== 'GET' || !access.isBrowserTrusted(req)) {
+        if ((req.method ?? 'GET') !== 'GET') {
           notFound(res)
           return
         }
