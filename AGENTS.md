@@ -33,4 +33,4 @@ This repository is a small authentication/reverse-proxy boundary in front of Dee
 
 ## Validation
 
-For release-facing changes run `pnpm run check` and `npm pack --dry-run`. `pnpm run test:coverage` may be used to inspect blind spots, but its percentage is not a release gate. Add regression tests only when they protect behavior affected by the change.
+For release-facing changes run `pnpm run check` and `npm pack --dry-run --ignore-scripts`. `pnpm run test:coverage` may be used to inspect blind spots, but its percentage is not a release gate. Add regression tests only when they protect behavior affected by the change.
