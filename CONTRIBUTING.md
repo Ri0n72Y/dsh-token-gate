@@ -7,7 +7,7 @@ Before opening a PR, run:
 ```sh
 pnpm install
 pnpm run check
-npm pack --dry-run
+npm pack --dry-run --ignore-scripts
 ```
 
 Add a regression test when a change affects observable plugin behavior, a non-trivial parsing/state rule, or fixes a reproduced bug. Avoid duplicate unit/integration checks for the same invariant, fake framework implementations, and tests added only to raise coverage numbers.
