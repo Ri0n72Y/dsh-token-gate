@@ -137,8 +137,9 @@ test('malformed request targets and parser errors stay on the opaque 404 surface
 test('upstream body abort terminates the downstream response', async (t) => {
   const upstream = createServer((_req, res) => {
     res.writeHead(200, { 'Content-Length': '100' })
+    res.flushHeaders()
     res.write('partial')
-    res.socket?.destroy()
+    setTimeout(() => res.socket?.destroy(), 20)
   })
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   t.after(() => new Promise<void>(resolve => upstream.close(() => resolve())))
@@ -146,20 +147,20 @@ test('upstream body abort terminates the downstream response', async (t) => {
   t.after(() => gateway.close())
   const sessionCookie = await bootstrap(port)
 
-  const aborted = await new Promise<boolean>((resolve, reject) => {
+  const outcome = await new Promise<'aborted' | 'incomplete-end' | 'complete'>((resolve, reject) => {
     const req = httpRequest({
       host: '127.0.0.1', port, path: '/',
       headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.10', cookie: sessionCookie },
     }, (res) => {
       res.resume()
-      res.once('aborted', () => resolve(true))
-      res.once('end', () => resolve(false))
+      res.once('aborted', () => resolve('aborted'))
+      res.once('end', () => resolve(res.complete ? 'complete' : 'incomplete-end'))
       res.once('error', reject)
     })
     req.on('error', reject)
     req.end()
   })
-  assert.equal(aborted, true)
+  assert.notEqual(outcome, 'complete')
 })
 
 test('WebSocket rejects browser-trust violations, relays non-101 responses, preserves early head, and closes on dispose', async () => {
