@@ -17,8 +17,9 @@ export interface AuthService {
   hasRequestSession(req: IncomingMessage, authority: string): boolean
   authorizeBootstrap(clientKey: string, submitted: string): boolean
   createSession(authority: string): string | undefined
-  sessionCookie(id: string, secure: boolean): string
+  sessionCookie(id: string): string
   stripSessionCookie(raw: string): string | undefined
+  isSessionSetCookie(raw: string): boolean
 }
 
 function tokenDigest(value: string): Buffer {
@@ -115,9 +116,8 @@ export function createAuthService(config: Config, token: string): AuthService {
       return id
     },
 
-    sessionCookie(id, secure) {
-      const base = `${config.cookieName}=${id}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(ttlMs / 1000)}`
-      return secure ? `${base}; Secure` : base
+    sessionCookie(id) {
+      return `${config.cookieName}=${id}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${Math.floor(ttlMs / 1000)}`
     },
 
     stripSessionCookie(raw) {
@@ -127,6 +127,11 @@ export function createAuthService(config: Config, token: string): AuthService {
         return part.slice(0, eq).trim() !== config.cookieName
       })
       return kept.length > 0 ? kept.join('; ') : undefined
+    },
+
+    isSessionSetCookie(raw) {
+      const eq = raw.indexOf('=')
+      return eq !== -1 && raw.slice(0, eq).trim() === config.cookieName
     },
   }
 }
