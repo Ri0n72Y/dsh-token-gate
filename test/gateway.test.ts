@@ -113,6 +113,27 @@ test('opaque bootstrap, authority-bound session, browser fence, and sanitized pr
   assert.equal(seen[0].headers.cookie, 'app_cookie=keep-me')
 })
 
+test('session cookie is Secure only when the trusted proxy reports HTTPS', async (t) => {
+  const upstream = createServer((_req, res) => res.end('ok'))
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise<void>(resolve => upstream.close(() => resolve())))
+  const upstreamPort = (upstream.address() as AddressInfo).port
+  const { gateway, port } = await startGateway(upstreamPort)
+  t.after(() => gateway.close())
+
+  const local = await request(port, '/?token=' + TOKEN, { headers: { 'x-forwarded-for': '203.0.113.20' } })
+  assert.equal(local.status, 303)
+  const localCookie = local.headers['set-cookie']
+  assert.ok(Array.isArray(localCookie))
+  assert.doesNotMatch(localCookie[0], /;\s*Secure\b/i)
+
+  const https = await request(port, '/?token=' + TOKEN, { headers: { 'x-forwarded-for': '203.0.113.21', 'x-forwarded-proto': 'https' } })
+  assert.equal(https.status, 303)
+  const httpsCookie = https.headers['set-cookie']
+  assert.ok(Array.isArray(httpsCookie))
+  assert.match(httpsCookie[0], /;\s*Secure\b/i)
+})
+
 test('allowlist uses only the configured trusted X-Forwarded-For chain', async (t) => {
   let hits = 0
   const upstream = createServer((_req, res) => { hits += 1; res.end('ok') })
@@ -155,7 +176,7 @@ test('upstream body abort terminates the downstream response', async (t) => {
   assert.equal(outcome, 'aborted')
 })
 
-test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, relays non-101 responses, preserves early head, and closes on dispose', async () => {
+test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, relays non-101 responses, preserves early head, and awaits socket close on dispose', async () => {
   const seenUpgrades: Array<Record<string, string | string[] | undefined>> = []
   const upstream = createServer()
   upstream.on('upgrade', (req, socket) => {
@@ -204,7 +225,12 @@ test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, rel
   assert.ok(acceptedHeaders)
   assert.equal(acceptedHeaders.connection?.toString().toLowerCase(), 'upgrade')
   assert.equal(acceptedHeaders['x-hop'], undefined)
-  const closed = new Promise<void>(resolve => earlyEcho.socket.once('close', () => resolve()))
-  await gateway.close(); await closed
+
+  let clientClosed = false
+  earlyEcho.socket.once('close', () => { clientClosed = true })
+  await gateway.close()
+  assert.equal(clientClosed, true)
+  assert.equal(earlyEcho.socket.destroyed, true)
+
   upstream.close(); upstream.closeAllConnections()
 })
