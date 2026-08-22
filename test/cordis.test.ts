@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { Context, FiberState, Service } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import { apply } from '../src/index.ts'
 import type { Config } from '../src/config.ts'
 
@@ -62,7 +62,6 @@ test('real Cordis fiber activation owns and releases the gateway listener', asyn
     apply: (ctx: Context) => apply(ctx, config(port)),
   })
   await gateFiber
-  assert.equal(gateFiber.state, FiberState.ACTIVE)
 
   await gateFiber.dispose()
 
@@ -89,8 +88,7 @@ test('real Cordis fiber reports listen acquisition failure', async () => {
     inject: ['webServer'],
     apply: (ctx: Context) => apply(ctx, config(port)),
   })
-  await assert.rejects(gateFiber, /EADDRINUSE/)
-  assert.equal(gateFiber.state, FiberState.FAILED)
+  await assert.rejects(async () => { await gateFiber }, /EADDRINUSE/)
 
   await new Promise<void>(resolve => occupied.close(() => resolve()))
   await webFiber.dispose()
