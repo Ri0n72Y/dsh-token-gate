@@ -35,6 +35,7 @@
     "lib/**/*.js",
     "cordis.patch.yml",
     "README.md",
+    "SECURITY.md",
     "LICENSE"
   ],
   "publishConfig": {
