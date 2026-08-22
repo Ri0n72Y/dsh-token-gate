@@ -14,7 +14,11 @@ const logger = { info() {}, warn() {}, error() {} }
 
 class TestWebServer extends Service {
   readonly host = '127.0.0.1' as const
-  constructor(ctx: Context, readonly port: number) { super(ctx, 'webServer') }
+  readonly port: number
+  constructor(ctx: Context, port: number) {
+    super(ctx, 'webServer')
+    this.port = port
+  }
 }
 
 declare module '@deepseek-ai/cordis' {
