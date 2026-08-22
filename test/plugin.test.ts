@@ -7,7 +7,7 @@ import { apply } from '../src/index.ts'
 import type { Config } from '../src/config.ts'
 
 const TOKEN = 'test-token-0123456789abcdef'
-function config(port: number): Config { return { token: TOKEN, cookieName: 'dsh_session', sessionTtlDays: 30, sessionMax: 64, rateMax: 10, rateWindowMinutes: 15, rateMaxKeys: 64, allowIps: [], trustedProxies: [], trustedHosts: [], realIpHeader: 'x-forwarded-for', allowGeneratedToken: false, bind: '127.0.0.1', port } }
+function config(port: number): Config { return { token: TOKEN, cookieName: 'dsh_session', secureCookie: true, sessionTtlDays: 30, sessionMax: 64, rateMax: 10, rateWindowMinutes: 15, rateMaxKeys: 64, allowIps: [], trustedProxies: [], trustedHosts: [], realIpHeader: 'x-forwarded-for', allowGeneratedToken: false, bind: '127.0.0.1', port } }
 const logger = { info() {}, warn() {}, error() {} }
 
 test('plugin refuses a non-loopback DSH upstream', async () => {
