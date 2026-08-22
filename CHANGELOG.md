@@ -23,5 +23,6 @@
 - Contain malformed request targets and unexpected request-handler exceptions to the affected request/socket instead of allowing them to escape the Node server callback.
 - Terminate downstream HTTP responses when the DSH upstream aborts mid-body.
 - Correct WebSocket proxy semantics for non-101 responses, sanitized upgrade headers, upstream cookie ownership, and early `head` bytes.
-- Replace the monolithic smoke script with Node test-runner unit/integration regressions and coverage gates.
-- Add Linux/Windows CI at the Node 22 floor plus a Linux Node 24 compatibility job, together with npm package metadata and tarball checks.
+- Keep the Node test-runner suite focused on observable gateway behavior and non-trivial parser/state rules; remove simulated Cordis lifecycle coverage and duplicate helper-level assertions.
+- Treat coverage output as a diagnostic instead of a percentage gate, so tests are not added solely to improve a score.
+- Keep CI aligned with the current test target: one Windows + Node 22 job running install, `pnpm run check`, and a script-free tarball inspection.
