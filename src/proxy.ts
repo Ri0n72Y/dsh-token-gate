@@ -52,7 +52,7 @@ export function forwardHeaders(
 
   for (const [key, value] of Object.entries(req.headers)) {
     const lower = key.toLowerCase()
-    if (lower === 'host' || lower === 'origin' || PROXY_IDENTITY_HEADERS.has(lower)) continue
+    if (lower === 'host' || lower === 'origin' || lower === 'expect' || PROXY_IDENTITY_HEADERS.has(lower)) continue
     if (declaredHop.has(lower) || HOP_BY_HOP.has(lower)) continue
     if (lower === 'cookie' && typeof value === 'string') {
       const cookie = auth.stripSessionCookie(value)
@@ -157,6 +157,7 @@ export function proxyHttp(
 
   upstream.on('error', (error) => {
     logger.warn('token-gate: upstream error: %s', String(error))
+    if (res.destroyed) return
     if (!res.headersSent) {
       res.writeHead(502)
       res.end()
