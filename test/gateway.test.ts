@@ -23,7 +23,14 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
 
 function request(port: number, path: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}) {
   return new Promise<{ status: number | undefined; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
-    const req = httpRequest({ host: '127.0.0.1', port, path, method: options.method ?? 'GET', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.10', ...options.headers } }, (res) => {
+    const req = httpRequest({
+      host: '127.0.0.1',
+      port,
+      path,
+      method: options.method ?? 'GET',
+      headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.10', ...options.headers },
+      agent: false,
+    }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', chunk => chunks.push(chunk as Buffer))
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }))
@@ -176,7 +183,7 @@ test('upstream body abort terminates the downstream response', async (t) => {
   const outcome = await new Promise<'aborted' | 'ended'>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('downstream response did not terminate after upstream abort')), 1000)
     const settle = (value: 'aborted' | 'ended') => { clearTimeout(timer); resolve(value) }
-    const req = httpRequest({ host: '127.0.0.1', port, path: '/', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.10', cookie: sessionCookie } }, (res) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path: '/', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.10', cookie: sessionCookie }, agent: false }, (res) => {
       res.resume()
       res.once('aborted', () => settle('aborted'))
       res.once('error', () => settle('aborted'))
@@ -206,7 +213,7 @@ test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, rel
   const sessionCookie = await bootstrap(port)
 
   const deniedUpgrade = await new Promise<boolean>((resolve) => {
-    const req = httpRequest({ host: '127.0.0.1', port, path: '/api/events.mux', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.50', cookie: sessionCookie, origin: 'https://evil.example.com', connection: 'Upgrade', upgrade: 'websocket' } })
+    const req = httpRequest({ host: '127.0.0.1', port, path: '/api/events.mux', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.50', cookie: sessionCookie, origin: 'https://evil.example.com', connection: 'Upgrade', upgrade: 'websocket' }, agent: false })
     let upgraded = false
     req.on('upgrade', () => { upgraded = true; resolve(false) })
     req.on('error', () => resolve(!upgraded))
@@ -216,7 +223,7 @@ test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, rel
   assert.equal(deniedUpgrade, true)
 
   const rejected = await new Promise<{ status: number | undefined; body: string; setCookie: string[] | undefined }>((resolve, reject) => {
-    const req = httpRequest({ host: '127.0.0.1', port, path: '/reject', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.50', cookie: sessionCookie, origin: 'http://dsh.example.com', connection: 'Upgrade', upgrade: 'websocket' } })
+    const req = httpRequest({ host: '127.0.0.1', port, path: '/reject', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.50', cookie: sessionCookie, origin: 'http://dsh.example.com', connection: 'Upgrade', upgrade: 'websocket' }, agent: false })
     req.on('response', (res) => { const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk as Buffer)); res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8'), setCookie: res.headers['set-cookie'] })) })
     req.on('error', reject)
     req.end()
@@ -241,16 +248,17 @@ test('WebSocket rejects browser-trust violations, sanitizes upgrade headers, rel
   assert.equal(acceptedHeaders.connection?.toString().toLowerCase(), 'upgrade')
   assert.equal(acceptedHeaders['x-hop'], undefined)
 
+  const upstreamSocketClosures = [...upgradedSockets].map(socket => new Promise<void>((resolve) => {
+    socket.once('close', () => resolve())
+  }))
   let clientClosed = false
   earlyEcho.socket.once('close', () => { clientClosed = true })
   await gateway.close()
+  await Promise.all(upstreamSocketClosures)
   assert.equal(clientClosed, true)
   assert.equal(earlyEcho.socket.destroyed, true)
+  assert.equal(upgradedSockets.size, 0)
 
-  const serverClosed = new Promise<void>(resolve => upstream.close(() => resolve()))
-  const socketsClosed = [...upgradedSockets].map(socket => new Promise<void>((resolve) => {
-    socket.once('close', () => resolve())
-    socket.destroy()
-  }))
-  await Promise.all([serverClosed, ...socketsClosed])
+  upstream.close()
+  upstream.closeAllConnections()
 })
