@@ -1,5 +1,5 @@
 import { createServer } from 'node:http'
-import type { Server, ServerResponse } from 'node:http'
+import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
 import type { Config } from './config.ts'
 import { createAuthService } from './auth.ts'
@@ -39,7 +39,7 @@ export function createGateway(options: GatewayOptions): Gateway {
   const access = createAccessPolicy(config, auth)
   const sockets = new Set<Socket>()
 
-  const server = createServer((req, res) => {
+  function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     const decision = access.decide(req)
     if (decision === 'deny') {
       notFound(res)
@@ -64,7 +64,7 @@ export function createGateway(options: GatewayOptions): Gateway {
         return
       }
       res.writeHead(303, {
-        'Set-Cookie': auth.sessionCookie(sessionId, access.isSecure(req)),
+        'Set-Cookie': auth.sessionCookie(sessionId),
         'Location': access.cleanBootstrapLocation(req),
         'Cache-Control': 'no-store',
         'Referrer-Policy': 'no-referrer',
@@ -74,6 +74,16 @@ export function createGateway(options: GatewayOptions): Gateway {
       return
     }
     proxyHttp(req, res, upstream, auth, logger)
+  }
+
+  const server = createServer((req, res) => {
+    try {
+      handleRequest(req, res)
+    } catch (error) {
+      logger.warn('token-gate: request handling error: %s', String(error))
+      if (res.headersSent) res.destroy()
+      else notFound(res)
+    }
   })
 
   server.on('connection', (socket) => {
@@ -83,11 +93,16 @@ export function createGateway(options: GatewayOptions): Gateway {
   })
 
   server.on('upgrade', (req, socket, head) => {
-    if (access.decide(req) !== 'allow') {
+    try {
+      if (access.decide(req) !== 'allow') {
+        socket.destroy()
+        return
+      }
+      proxyUpgrade(req, socket, head, upstream, auth, logger)
+    } catch (error) {
+      logger.warn('token-gate: upgrade handling error: %s', String(error))
       socket.destroy()
-      return
     }
-    proxyUpgrade(req, socket, head, upstream, auth, logger)
   })
 
   server.on('error', (error) => {
