@@ -11,7 +11,7 @@ const logs = { info() {}, warn() {}, error() {} }
 
 function baseConfig(overrides: Partial<Config> = {}): Config {
   return {
-    token: TOKEN, cookieName: 'dsh_session', sessionTtlDays: 30, sessionMax: 64,
+    token: TOKEN, cookieName: 'dsh_session', secureCookie: true, sessionTtlDays: 30, sessionMax: 64,
     rateMax: 4, rateWindowMinutes: 15, rateMaxKeys: 64, allowIps: [],
     trustedProxies: ['127.0.0.1/32'], trustedHosts: [], realIpHeader: 'x-forwarded-for',
     allowGeneratedToken: false, bind: '127.0.0.1', port: 0, ...overrides,
@@ -43,6 +43,18 @@ async function bootstrap(port: number, headers: Record<string, string> = {}): Pr
   const setCookie = response.headers['set-cookie']
   assert.ok(Array.isArray(setCookie))
   return setCookie[0].split(';')[0]
+}
+
+function rawExchange(port: number, payload: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1')
+    let raw = ''
+    socket.on('connect', () => socket.write(payload))
+    socket.on('data', chunk => { raw += chunk.toString() })
+    socket.on('end', () => resolve(raw))
+    socket.on('close', () => resolve(raw))
+    socket.on('error', reject)
+  })
 }
 
 test('opaque bootstrap, authority-bound session, browser fence, and sanitized proxying', async (t) => {
@@ -106,6 +118,50 @@ test('allowlist cannot be bypassed with CF header behind a generic local proxy',
   assert.equal(hits, 1)
 })
 
+test('malformed request targets and parser errors stay on the opaque 404 surface', async (t) => {
+  const upstream = createServer((_req, res) => res.end('unexpected'))
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise<void>(resolve => upstream.close(() => resolve())))
+  const { gateway, port } = await startGateway((upstream.address() as AddressInfo).port)
+  t.after(() => gateway.close())
+
+  const malformedTarget = await rawExchange(port, 'GET //[bad HTTP/1.1\r\nHost: dsh.example.com\r\n\r\n')
+  assert.match(malformedTarget, /^HTTP\/1\.1 404/)
+  assert.match(malformedTarget, /404 page not found/)
+
+  const parserError = await rawExchange(port, 'GET / HTTP/1.1\r\nHost: dsh.example.com\r\nBroken Header\r\n\r\n')
+  assert.match(parserError, /^HTTP\/1\.1 404/)
+  assert.match(parserError, /404 page not found/)
+})
+
+test('upstream body abort terminates the downstream response', async (t) => {
+  const upstream = createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Length': '100' })
+    res.write('partial')
+    res.socket?.destroy()
+  })
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise<void>(resolve => upstream.close(() => resolve())))
+  const { gateway, port } = await startGateway((upstream.address() as AddressInfo).port)
+  t.after(() => gateway.close())
+  const sessionCookie = await bootstrap(port)
+
+  const aborted = await new Promise<boolean>((resolve, reject) => {
+    const req = httpRequest({
+      host: '127.0.0.1', port, path: '/',
+      headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.10', cookie: sessionCookie },
+    }, (res) => {
+      res.resume()
+      res.once('aborted', () => resolve(true))
+      res.once('end', () => resolve(false))
+      res.once('error', reject)
+    })
+    req.on('error', reject)
+    req.end()
+  })
+  assert.equal(aborted, true)
+})
+
 test('WebSocket rejects browser-trust violations, relays non-101 responses, preserves early head, and closes on dispose', async () => {
   const upstream = createServer()
   upstream.on('upgrade', (req, socket) => {
@@ -119,7 +175,7 @@ test('WebSocket rejects browser-trust violations, relays non-101 responses, pres
   const sessionCookie = await bootstrap(port)
 
   const deniedUpgrade = await new Promise<boolean>((resolve) => {
-    const req = httpRequest({ host: '127.0.0.1', port, path: '/api/events.mux', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.50', cookie: sessionCookie, origin: 'https://evil.example.com', connection: 'Upgrade', upgrade: 'websocket' } })
+    const req = httpRequest({ host: '127.0.0.1', port, path: '/api/events.mux', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.50', cookie: sessionCookie, origin: 'http://evil.example.com', connection: 'Upgrade', upgrade: 'websocket' } })
     let upgraded = false
     req.on('upgrade', () => { upgraded = true; resolve(false) })
     req.on('error', () => resolve(!upgraded))
@@ -140,13 +196,17 @@ test('WebSocket rejects browser-trust violations, relays non-101 responses, pres
   const earlyEcho = await new Promise<{ raw: string; socket: import('node:net').Socket }>((resolve, reject) => {
     const socket = connect(port, '127.0.0.1')
     let raw = ''
-    socket.on('connect', () => socket.write(['GET /api/events.mux HTTP/1.1','Host: dsh.example.com','X-Forwarded-For: 203.0.113.50',`Cookie: ${sessionCookie}`,'Origin: http://dsh.example.com','Connection: Upgrade','Upgrade: websocket','','EARLY'].join('\r\n')))
+    socket.on('connect', () => socket.write(['GET /api/events.mux HTTP/1.1','Host: dsh.example.com','X-Forwarded-For: 203.0.113.50',`Cookie: ${sessionCookie}`,'Origin: http://dsh.example.com','Connection: keep-alive, Upgrade, x-hop','X-Hop: remove-me','Upgrade: websocket','','EARLY'].join('\r\n')))
     socket.on('data', (chunk) => { raw += chunk.toString(); if (raw.includes('\r\n\r\nEARLY')) resolve({ raw, socket }) })
     socket.on('error', reject)
   })
   assert.match(earlyEcho.raw, /101 Switching Protocols/)
+  assert.match(earlyEcho.raw, /Connection: Upgrade/i)
+  assert.doesNotMatch(earlyEcho.raw, /x-hop/i)
   assert.match(earlyEcho.raw, /\r\n\r\nEARLY/)
   const closed = new Promise<void>(resolve => earlyEcho.socket.once('close', () => resolve()))
-  await gateway.close(); await closed
-  upstream.close(); upstream.closeAllConnections()
+  await gateway.close()
+  await closed
+  upstream.close()
+  upstream.closeAllConnections()
 })
