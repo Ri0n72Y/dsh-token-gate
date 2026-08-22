@@ -16,8 +16,21 @@ export interface AccessPolicy {
   isBrowserTrusted(req: IncomingMessage): boolean
 }
 
-function requestUrl(req: IncomingMessage): URL {
-  return new URL(req.url ?? '/', 'http://token-gate.invalid')
+const REQUEST_BASE = new URL('http://token-gate.invalid')
+
+function requestUrl(req: IncomingMessage): URL | undefined {
+  const raw = req.url ?? '/'
+  // The gateway is an origin server, not a forward proxy. Restrict the public
+  // surface to origin-form request targets and keep scheme-relative/absolute
+  // targets away from WHATWG authority rewriting.
+  if (!raw.startsWith('/') || raw.startsWith('//')) return undefined
+  try {
+    const url = new URL(raw, REQUEST_BASE)
+    if (url.origin !== REQUEST_BASE.origin || url.hash !== '') return undefined
+    return url
+  } catch {
+    return undefined
+  }
 }
 
 function parseAuthority(authority: string, scheme = 'http:'): URL | undefined {
@@ -30,9 +43,15 @@ function parseAuthority(authority: string, scheme = 'http:'): URL | undefined {
   }
 }
 
+function configuredPort(entry: string, entryUrl: URL): string | undefined {
+  if (entryUrl.port !== '') return entryUrl.port
+  const httpsPort = new URL(`https://${entry}`).port
+  return httpsPort === '' ? undefined : httpsPort
+}
+
 function canonicalConfiguredAuthority(entry: string, entryUrl: URL): string {
-  const port = entryUrl.port !== '' ? entryUrl.port : new URL(`https://${entry}`).port
-  return port === '' ? entryUrl.hostname : `${entryUrl.hostname}:${port}`
+  const port = configuredPort(entry, entryUrl)
+  return port === undefined ? entryUrl.hostname : `${entryUrl.hostname}:${port}`
 }
 
 function assertTrustedAuthority(entry: string): void {
@@ -41,13 +60,17 @@ function assertTrustedAuthority(entry: string): void {
   throw new Error(`token-gate: trustedHosts entry ${JSON.stringify(entry)} is not a canonical host[:port] authority`)
 }
 
+function effectivePort(url: URL): string {
+  if (url.port !== '') return url.port
+  return url.protocol === 'https:' ? '443' : '80'
+}
+
 function isTrustedAuthority(hostUrl: URL, trustedHosts: readonly string[]): boolean {
   return trustedHosts.some((entry) => {
     const entryUrl = parseAuthority(entry)
-    if (entryUrl === undefined) return false
-    return canonicalConfiguredAuthority(entry, entryUrl) === entryUrl.hostname
-      ? entryUrl.hostname === hostUrl.hostname
-      : entryUrl.host === hostUrl.host
+    if (entryUrl === undefined || entryUrl.hostname !== hostUrl.hostname) return false
+    const port = configuredPort(entry, entryUrl)
+    return port === undefined || port === effectivePort(hostUrl)
   })
 }
 
@@ -88,10 +111,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
     const peer = peerIp(req)
     if (peer.length === 0) return ''
     if (!trustedProxies.has(peer) || config.realIpHeader === 'none') return peer
-    if (config.realIpHeader === 'x-forwarded-for') return forwardedForClient(req, peer)
-    const raw = firstHeader(req.headers, 'cf-connecting-ip')
-    const value = normalizeIp(raw)
-    return isIP(value) === 0 ? '' : value
+    return forwardedForClient(req, peer)
   }
 
   function isSecure(req: IncomingMessage): boolean {
@@ -111,23 +131,30 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
   }
 
   function bootstrapToken(req: IncomingMessage): string | undefined {
+    const raw = req.url ?? '/'
+    const queryIndex = raw.indexOf('?')
+    const rawPath = queryIndex === -1 ? raw : raw.slice(0, queryIndex)
+    if (rawPath !== '/') return undefined
     const url = requestUrl(req)
-    if (url.pathname !== '/') return undefined
+    if (url === undefined) return undefined
     const token = url.searchParams.get('token')
     return token === null || token.length === 0 ? undefined : token
   }
 
   function isBrowserTrusted(req: IncomingMessage): boolean {
     const host = firstHeader(req.headers, 'host')
-    if (host === undefined || parseAuthority(host) === undefined) return false
-    if (firstHeader(req.headers, 'sec-fetch-site')?.toLowerCase() === 'cross-site') return false
+    if (host === undefined) return false
+    const protocol = isSecure(req) ? 'https:' : 'http:'
+    const hostUrl = parseAuthority(host, protocol)
+    if (hostUrl === undefined) return false
+    if (firstHeader(req.headers, 'sec-fetch-site')?.trim().toLowerCase() === 'cross-site') return false
     const origin = firstHeader(req.headers, 'origin')
     if (origin === undefined) return true
     try {
       const originUrl = new URL(origin)
-      if (originUrl.protocol !== 'http:' && originUrl.protocol !== 'https:') return false
-      const hostUrl = parseAuthority(host, originUrl.protocol)
-      return hostUrl !== undefined && originUrl.host === hostUrl.host
+      if (originUrl.protocol !== protocol) return false
+      if (originUrl.username !== '' || originUrl.password !== '' || originUrl.pathname !== '/' || originUrl.search !== '' || originUrl.hash !== '') return false
+      return originUrl.host === hostUrl.host
     } catch {
       return false
     }
@@ -136,7 +163,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
   function isAllowlistAuthorityTrusted(req: IncomingMessage): boolean {
     const host = firstHeader(req.headers, 'host')
     if (host === undefined) return false
-    const hostUrl = parseAuthority(host)
+    const hostUrl = parseAuthority(host, isSecure(req) ? 'https:' : 'http:')
     if (hostUrl === undefined) return false
     if (isLoopbackHostname(hostUrl.hostname) || isIpLiteralHostname(hostUrl.hostname)) return true
     return isTrustedAuthority(hostUrl, config.trustedHosts)
@@ -144,7 +171,11 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
 
   return {
     decide(req) {
-      if (bootstrapToken(req) !== undefined) return 'bootstrap'
+      if (requestUrl(req) === undefined) return 'deny'
+      const token = bootstrapToken(req)
+      if (token !== undefined) {
+        return requestAuthority(req) !== undefined && isBrowserTrusted(req) ? 'bootstrap' : 'deny'
+      }
       const authority = requestAuthority(req)
       if (authority === undefined || !isBrowserTrusted(req)) return 'deny'
       if (auth.hasRequestSession(req, authority)) return 'allow'
@@ -154,6 +185,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
     bootstrapToken,
     cleanBootstrapLocation(req) {
       const url = requestUrl(req)
+      if (url === undefined) return '/'
       url.searchParams.delete('token')
       const query = url.searchParams.toString()
       return `${url.pathname}${query.length > 0 ? `?${query}` : ''}`
