@@ -8,7 +8,9 @@
 - Default the gateway itself to `127.0.0.1` and make session cookies `Secure` by default.
 - Make trusted proxies explicit and resolve `X-Forwarded-For` from the right through the trusted chain; `CF-Connecting-IP` is never used for authorization or rate identity.
 - Bind sessions to the authority used during bootstrap and validate Host/Origin/Fetch-Metadata before proxy rewriting, including the bootstrap request itself.
+- Preserve clickable bootstrap share links only for user-activated top-level document navigation; cross-site fetch/XHR, iframe, non-user navigation, and conflicting Origin remain denied.
 - Reject malformed, absolute-form, scheme-relative, and normalized-to-root request targets before access decisions; keep HTTP parser errors on the same opaque 404 surface where a response is possible.
+- Own Node HTTP `Expect` and `CONNECT` surfaces so unauthenticated requests do not leak `100 Continue` or `417` behavior; strip `Expect` before forwarding authorized requests upstream.
 - Require IP allowlist bypasses to pass a scheme-aware Host fence; named authorities must be declared in `trustedHosts` and explicit ports match the effective external port.
 - Keep bootstrap reserved to the literal `/?token=...` namespace.
 - Strip gateway cookies, proxy-identity headers, and hop-by-hop headers before forwarding traffic to DSH; prevent upstream `Set-Cookie` from overwriting the gateway session namespace.
@@ -22,11 +24,11 @@
 ### Engineering
 
 - Split the gateway into config, network, access, auth, proxy, upstream, gateway lifecycle, and Cordis entry modules.
-- Make Cordis activation/disposal await listen and close, so listen failures fail the fiber and HMR waits for teardown.
+- Make Cordis activation/disposal await listen and close, so listen failures fail the fiber and HMR waits for teardown; failed acquisition cleans up partial gateway state.
 - Await owned socket closure during gateway disposal, including upgraded connections.
 - Correct WebSocket proxy semantics for non-101 responses and early `head` bytes.
 - Replace the monolithic smoke script with Node test-runner unit/integration regressions and coverage gates.
 - Add real Cordis `Context` / Fiber lifecycle regression tests in addition to isolated lifecycle fixtures.
-- Add raw malformed HTTP and upstream-abort integration regressions.
+- Add raw malformed HTTP, HTTP expectation/CONNECT, and upstream-abort integration regressions.
 - Add cross-platform CI and npm package metadata.
 - Ship `SECURITY.md` in the npm tarball.
