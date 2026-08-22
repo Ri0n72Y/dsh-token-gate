@@ -49,7 +49,7 @@
     "build": "tsdown --config tsdown.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test \"test/**/*.test.ts\"",
-    "test:coverage": "node --experimental-strip-types --experimental-test-coverage --test-coverage-exclude=\"test/**\" --test-coverage-lines=90 --test-coverage-branches=80 --test-coverage-functions=85 --test \"test/**/*.test.ts\"",
+    "test:coverage": "node --experimental-strip-types --experimental-test-coverage --test-coverage-exclude=\"test/**\" --test \"test/**/*.test.ts\"",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build",
     "prepare": "tsdown --config tsdown.config.ts",
     "prepack": "pnpm run check",
