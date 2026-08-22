@@ -78,7 +78,7 @@ test('Cordis effect returns an awaited gateway disposer', async () => {
   await disposer()
 })
 
-test('real Cordis disposal waits for upgraded sockets and releases the gateway port', async () => {
+test('real Cordis disposal waits for upgraded sockets and releases the gateway port', { timeout: 5000 }, async () => {
   const upstream = createServer()
   let upstreamSocket: Duplex | undefined
   upstream.on('upgrade', (_req, socket) => {
