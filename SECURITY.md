@@ -60,11 +60,13 @@ Gateway shutdown destroys and awaits owned HTTP and upgraded sockets. Upstream r
 
 ## Opaque unauthenticated surface
 
-Ordinary unauthenticated requests, invalid bootstrap attempts, malformed request targets, and Node HTTP parser errors are kept on the same minimal response shape where an HTTP response is possible:
+Ordinary unauthenticated requests, invalid bootstrap attempts, malformed request targets, Node HTTP parser errors, unsupported `Expect` requests, and `CONNECT` requests are kept on the same minimal response shape where an HTTP response is possible:
 
 ```text
 404 page not found
 ```
+
+The gateway explicitly owns `Expect: 100-continue`: it sends `100 Continue` only after an ordinary request has passed access control, then removes `Expect` before forwarding upstream. This prevents Node's automatic pre-authentication `100 Continue` or `417 Expectation Failed` behavior from creating a distinguishable unauthenticated surface.
 
 WebSocket requests that fail authorization are closed without proxying.
 
