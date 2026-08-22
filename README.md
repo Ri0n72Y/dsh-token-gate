@@ -126,10 +126,17 @@ trustedHosts: ['dsh.example.com']
 ```sh
 pnpm install
 pnpm run check
-pnpm run test:coverage
 npm pack --dry-run
 dsh plugin --profile web add .
 ```
+
+需要查看测试盲点时，可以额外执行：
+
+```sh
+pnpm run test:coverage
+```
+
+覆盖率只作为诊断信息，不作为发布分数或门禁。测试应围绕插件可观察行为、非平凡解析/状态规则和已复现回归；不要为了提高覆盖率重复测试实现细节或模拟 Cordis 内部行为。
 
 开发期：
 
@@ -137,7 +144,7 @@ dsh plugin --profile web add .
 dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
 ```
 
-CI 执行 Ubuntu Node 22、Ubuntu Node 24、Windows Node 22 三个 job，均包含 typecheck、覆盖率、build 与 tarball 检查；覆盖率门禁保持 lines 90%、branches 80%、functions 85%。
+当前测试版只以 Windows + Node 22 作为 CI 验证环境。只有出现明确的平台差异或扩大正式支持范围时，才增加额外平台/runtime job。
 
 ## License
 
