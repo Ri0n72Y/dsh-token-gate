@@ -64,7 +64,7 @@ export function createGateway(options: GatewayOptions): Gateway {
         return
       }
       res.writeHead(303, {
-        'Set-Cookie': auth.sessionCookie(sessionId),
+        'Set-Cookie': auth.sessionCookie(sessionId, access.isSecure(req)),
         'Location': access.cleanBootstrapLocation(req),
         'Cache-Control': 'no-store',
         'Referrer-Policy': 'no-referrer',
@@ -129,12 +129,15 @@ export function createGateway(options: GatewayOptions): Gateway {
       })
     },
 
-    close() {
-      for (const socket of sockets) socket.destroy()
-      if (!server.listening) return Promise.resolve()
-      return new Promise<void>((resolve) => {
-        server.close(() => resolve())
-      })
+    async close() {
+      const socketClosures = [...sockets].map(socket => new Promise<void>((resolve) => {
+        socket.once('close', () => resolve())
+        socket.destroy()
+      }))
+      const serverClosed = server.listening
+        ? new Promise<void>((resolve) => { server.close(() => resolve()) })
+        : Promise.resolve()
+      await Promise.all([serverClosed, ...socketClosures])
     },
   }
 }
