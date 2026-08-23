@@ -3,7 +3,6 @@ import type { IncomingMessage } from 'node:http'
 import type { Config } from './config.ts'
 
 interface Session {
-  createdAt: number
   expiresAt: number
   authority: string
 }
@@ -112,7 +111,7 @@ export function createAuthService(config: Config, token: string): AuthService {
       if (sessions.size >= config.sessionMax) return undefined
       const now = Date.now()
       const id = randomUUID()
-      sessions.set(id, { createdAt: now, expiresAt: now + ttlMs, authority })
+      sessions.set(id, { expiresAt: now + ttlMs, authority })
       return id
     },
 
