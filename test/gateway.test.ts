@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
 import type { Server } from 'node:http'
 import { connect } from 'node:net'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 import { createGateway } from '../src/gateway.ts'
 import type { Config } from '../src/config.ts'
 import type { Gateway } from '../src/gateway.ts'
@@ -72,6 +72,22 @@ function rawRequest(port: number, payload: string): Promise<string> {
   })
 }
 
+function withinTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), IO_TIMEOUT_MS)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
 async function startGateway(upstreamPort: number, config: Config = baseConfig()) {
   const gateway = createGateway({ config, token: TOKEN, upstream: { host: '127.0.0.1', port: upstreamPort }, logger: logs })
   await gateway.listen()
@@ -87,7 +103,7 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 async function closeFixture(gateway: Gateway, upstream: Server): Promise<void> {
-  await gateway.close()
+  await closeServer(gateway.server)
   await closeServer(upstream)
 }
 
@@ -201,6 +217,7 @@ test('upstream body abort terminates the downstream response', async (t) => {
 test('WebSocket relays rejection, early data, and closes the client on gateway dispose', async (t) => {
   const upstreamSockets = new Set<import('node:stream').Duplex>()
   const upstream = createServer()
+  let upgradedClient: Socket | undefined
   upstream.on('upgrade', (req, socket) => {
     upstreamSockets.add(socket)
     socket.once('close', () => upstreamSockets.delete(socket))
@@ -215,8 +232,9 @@ test('WebSocket relays rejection, early data, and closes the client on gateway d
   const upstreamPort = (upstream.address() as AddressInfo).port
   const { gateway, port } = await startGateway(upstreamPort)
   t.after(async () => {
-    await gateway.close()
+    upgradedClient?.destroy()
     for (const socket of upstreamSockets) socket.destroy()
+    await closeServer(gateway.server)
     await closeServer(upstream)
   })
   const sessionCookie = await bootstrap(port)
@@ -241,8 +259,9 @@ test('WebSocket relays rejection, early data, and closes the client on gateway d
   assert.equal(rejected.status, 426)
   assert.equal(rejected.body, 'denied!')
 
-  const earlyEcho = await new Promise<{ raw: string; socket: import('node:net').Socket }>((resolve, reject) => {
+  const earlyEcho = await new Promise<{ raw: string; socket: Socket }>((resolve, reject) => {
     const socket = connect(port, '127.0.0.1')
+    upgradedClient = socket
     let raw = ''
     let settled = false
     const fail = (error: Error) => {
@@ -280,6 +299,6 @@ test('WebSocket relays rejection, early data, and closes the client on gateway d
 
   let clientClosed = false
   earlyEcho.socket.once('close', () => { clientClosed = true })
-  await gateway.close()
+  await withinTimeout(gateway.close(), 'gateway.close() did not settle after destroying the active WebSocket')
   assert.equal(clientClosed, true)
 })
