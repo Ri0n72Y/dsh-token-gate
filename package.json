@@ -51,9 +51,8 @@
     "test": "node --experimental-strip-types --test \"test/**/*.test.ts\"",
     "test:coverage": "node --experimental-strip-types --experimental-test-coverage --test-coverage-exclude=\"test/**\" --test \"test/**/*.test.ts\"",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build",
-    "prepare": "tsdown --config tsdown.config.ts",
     "prepack": "pnpm run check",
-    "deploy": "pnpm run prepare && dsh plugin --profile web add ."
+    "deploy": "pnpm run build && dsh plugin --profile web add ."
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
