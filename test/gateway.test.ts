@@ -9,6 +9,7 @@ import type { Config } from '../src/config.ts'
 import type { Gateway } from '../src/gateway.ts'
 
 const TOKEN = 'test-token-0123456789abcdef'
+const IO_TIMEOUT_MS = 2000
 const logs = { info() {}, warn() {}, error() {} }
 
 function baseConfig(overrides: Partial<Config> = {}): Config {
@@ -32,8 +33,11 @@ function request(port: number, path: string, options: { method?: string; headers
     }, (res) => {
       const chunks: Buffer[] = []
       res.on('data', chunk => chunks.push(chunk as Buffer))
+      res.on('aborted', () => reject(new Error(`HTTP response aborted for ${path}`)))
+      res.on('error', reject)
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }))
     })
+    req.setTimeout(IO_TIMEOUT_MS, () => req.destroy(new Error(`HTTP request timed out for ${path}`)))
     req.on('error', reject)
     if (options.body !== undefined) req.write(options.body)
     req.end()
@@ -44,10 +48,27 @@ function rawRequest(port: number, payload: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const socket = connect(port, '127.0.0.1')
     let raw = ''
+    let settled = false
+    const fail = (error: Error) => {
+      if (settled) return
+      settled = true
+      socket.setTimeout(0)
+      reject(error)
+    }
+    const finish = () => {
+      if (settled) return
+      settled = true
+      socket.setTimeout(0)
+      resolve(raw)
+    }
+    socket.setTimeout(IO_TIMEOUT_MS, () => socket.destroy(new Error('raw HTTP request timed out')))
     socket.on('connect', () => socket.write(payload))
     socket.on('data', chunk => { raw += chunk.toString() })
-    socket.on('end', () => resolve(raw))
-    socket.on('error', reject)
+    socket.on('end', finish)
+    socket.on('error', fail)
+    socket.on('close', () => {
+      if (!settled) fail(new Error('raw HTTP connection closed before response completed'))
+    })
   })
 }
 
@@ -162,21 +183,22 @@ test('upstream body abort terminates the downstream response', async (t) => {
   const sessionCookie = await bootstrap(port)
 
   const outcome = await new Promise<'aborted' | 'ended'>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('downstream response did not terminate after upstream abort')), 1000)
+    const timer = setTimeout(() => reject(new Error('downstream response did not terminate after upstream abort')), IO_TIMEOUT_MS)
     const settle = (value: 'aborted' | 'ended') => { clearTimeout(timer); resolve(value) }
+    const fail = (error: Error) => { clearTimeout(timer); reject(error) }
     const req = httpRequest({ host: '127.0.0.1', port, path: '/', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.10', cookie: sessionCookie }, agent: false }, (res) => {
       res.resume()
       res.once('aborted', () => settle('aborted'))
       res.once('error', () => settle('aborted'))
       res.once('end', () => settle('ended'))
     })
-    req.on('error', reject)
+    req.on('error', fail)
     req.end()
   })
   assert.equal(outcome, 'aborted')
 })
 
-test('WebSocket relays rejection, early data, and closes the client on gateway dispose', async () => {
+test('WebSocket relays rejection, early data, and closes the client on gateway dispose', async (t) => {
   const upstreamSockets = new Set<import('node:stream').Duplex>()
   const upstream = createServer()
   upstream.on('upgrade', (req, socket) => {
@@ -192,50 +214,72 @@ test('WebSocket relays rejection, early data, and closes the client on gateway d
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   const upstreamPort = (upstream.address() as AddressInfo).port
   const { gateway, port } = await startGateway(upstreamPort)
-  const sessionCookie = await bootstrap(port)
-
-  try {
-    const rejected = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
-      const req = httpRequest({ host: '127.0.0.1', port, path: '/reject', headers: { host: 'dsh.example.com', cookie: sessionCookie, origin: 'http://dsh.example.com', connection: 'Upgrade', upgrade: 'websocket' }, agent: false })
-      req.on('response', (res) => {
-        const chunks: Buffer[] = []
-        res.on('data', chunk => chunks.push(chunk as Buffer))
-        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }))
-      })
-      req.on('error', reject)
-      req.end()
-    })
-    assert.equal(rejected.status, 426)
-    assert.equal(rejected.body, 'denied!')
-
-    const earlyEcho = await new Promise<{ raw: string; socket: import('node:net').Socket }>((resolve, reject) => {
-      const socket = connect(port, '127.0.0.1')
-      let raw = ''
-      socket.on('connect', () => socket.write([
-        'GET /api/events.mux HTTP/1.1',
-        'Host: dsh.example.com',
-        `Cookie: ${sessionCookie}`,
-        'Origin: http://dsh.example.com',
-        'Connection: Upgrade',
-        'Upgrade: websocket',
-        '',
-        'EARLY',
-      ].join('\r\n')))
-      socket.on('data', (chunk) => {
-        raw += chunk.toString()
-        if (raw.includes('\r\n\r\nEARLY')) resolve({ raw, socket })
-      })
-      socket.on('error', reject)
-    })
-    assert.match(earlyEcho.raw, /^HTTP\/1\.1 101 /)
-    assert.match(earlyEcho.raw, /\r\n\r\nEARLY/)
-
-    let clientClosed = false
-    earlyEcho.socket.once('close', () => { clientClosed = true })
+  t.after(async () => {
     await gateway.close()
-    assert.equal(clientClosed, true)
-  } finally {
     for (const socket of upstreamSockets) socket.destroy()
     await closeServer(upstream)
-  }
+  })
+  const sessionCookie = await bootstrap(port)
+
+  const rejected = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path: '/reject', headers: { host: 'dsh.example.com', cookie: sessionCookie, origin: 'http://dsh.example.com', connection: 'Upgrade', upgrade: 'websocket' }, agent: false })
+    req.setTimeout(IO_TIMEOUT_MS, () => req.destroy(new Error('WebSocket rejection request timed out')))
+    req.on('response', (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', chunk => chunks.push(chunk as Buffer))
+      res.on('aborted', () => reject(new Error('WebSocket rejection response aborted')))
+      res.on('error', reject)
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }))
+    })
+    req.on('upgrade', (_res, socket) => {
+      socket.destroy()
+      reject(new Error('expected ordinary HTTP rejection, received an upgrade'))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+  assert.equal(rejected.status, 426)
+  assert.equal(rejected.body, 'denied!')
+
+  const earlyEcho = await new Promise<{ raw: string; socket: import('node:net').Socket }>((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1')
+    let raw = ''
+    let settled = false
+    const fail = (error: Error) => {
+      if (settled) return
+      settled = true
+      socket.setTimeout(0)
+      reject(error)
+    }
+    socket.setTimeout(IO_TIMEOUT_MS, () => socket.destroy(new Error('WebSocket handshake timed out')))
+    socket.on('connect', () => socket.write([
+      'GET /api/events.mux HTTP/1.1',
+      'Host: dsh.example.com',
+      `Cookie: ${sessionCookie}`,
+      'Origin: http://dsh.example.com',
+      'Connection: Upgrade',
+      'Upgrade: websocket',
+      '',
+      'EARLY',
+    ].join('\r\n')))
+    socket.on('data', (chunk) => {
+      raw += chunk.toString()
+      if (!settled && raw.includes('\r\n\r\nEARLY')) {
+        settled = true
+        socket.setTimeout(0)
+        resolve({ raw, socket })
+      }
+    })
+    socket.on('error', fail)
+    socket.on('close', () => {
+      if (!settled) fail(new Error('WebSocket connection closed before early data was echoed'))
+    })
+  })
+  assert.match(earlyEcho.raw, /^HTTP\/1\.1 101 /)
+  assert.match(earlyEcho.raw, /\r\n\r\nEARLY/)
+
+  let clientClosed = false
+  earlyEcho.socket.once('close', () => { clientClosed = true })
+  await gateway.close()
+  assert.equal(clientClosed, true)
 })
