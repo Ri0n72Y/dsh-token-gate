@@ -41,10 +41,10 @@ browser / cloudflared / caddy
 
 ## 首次登录
 
-推荐在 DSH 进程环境中设置：
+推荐在 DSH 进程环境中设置。当前测试环境为 Windows，PowerShell 示例：
 
-```sh
-export DSH_AUTH_TOKEN='replace-with-a-long-random-secret'
+```powershell
+$env:DSH_AUTH_TOKEN = 'replace-with-a-long-random-secret'
 ```
 
 远程 HTTPS 入口访问：
