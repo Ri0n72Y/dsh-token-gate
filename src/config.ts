@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
 
-export type RealIpHeader = 'none' | 'x-forwarded-for' | 'cf-connecting-ip'
+export type RealIpHeader = 'none' | 'x-forwarded-for'
 
 export interface Config {
   token?: string
@@ -34,10 +34,9 @@ export const Config: Schema<Config> = Schema.object({
   realIpHeader: Schema.union([
     Schema.const('none'),
     Schema.const('x-forwarded-for'),
-    Schema.const('cf-connecting-ip'),
   ]).default('x-forwarded-for'),
   allowGeneratedToken: Schema.boolean().default(false),
-  bind: Schema.union([Schema.const('0.0.0.0'), Schema.const('127.0.0.1')]).default('0.0.0.0'),
+  bind: Schema.union([Schema.const('0.0.0.0'), Schema.const('127.0.0.1')]).default('127.0.0.1'),
   port: Schema.natural().min(1).max(65535).default(3081),
 })
 

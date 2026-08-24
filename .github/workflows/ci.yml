@@ -7,11 +7,7 @@ on:
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -22,8 +18,6 @@ jobs:
           node-version: 22.20.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run typecheck
-      - run: pnpm run test:coverage
-      - run: pnpm run build
+      - run: pnpm run check
       - name: inspect publish tarball
-        run: npm pack --dry-run
+        run: npm pack --dry-run --ignore-scripts

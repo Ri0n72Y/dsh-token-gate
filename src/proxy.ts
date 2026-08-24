@@ -53,11 +53,7 @@ export function forwardHeaders(
   for (const [key, value] of Object.entries(req.headers)) {
     const lower = key.toLowerCase()
     if (lower === 'host' || lower === 'origin' || PROXY_IDENTITY_HEADERS.has(lower)) continue
-    if (declaredHop.has(lower) && lower !== 'upgrade') continue
-    if (HOP_BY_HOP.has(lower)) {
-      if (keepUpgrade && (lower === 'connection' || lower === 'upgrade')) out[key] = value
-      continue
-    }
+    if (declaredHop.has(lower) || HOP_BY_HOP.has(lower)) continue
     if (lower === 'cookie' && typeof value === 'string') {
       const cookie = auth.stripSessionCookie(value)
       if (cookie !== undefined) out[key] = cookie
@@ -68,21 +64,34 @@ export function forwardHeaders(
 
   out.host = `${target.host}:${target.port}`
   if (typeof req.headers.origin === 'string') out.origin = `http://${target.host}:${target.port}`
+  if (keepUpgrade && typeof req.headers.upgrade === 'string' && req.headers.upgrade.trim().length > 0) {
+    out.connection = 'Upgrade'
+    out.upgrade = req.headers.upgrade
+  }
   return out
 }
 
-export function sanitizeResponseHeaders(headers: IncomingHttpHeaders): Record<string, string | string[] | undefined> {
+export function sanitizeResponseHeaders(
+  headers: IncomingHttpHeaders,
+  auth: AuthService,
+): Record<string, string | string[] | undefined> {
   const out: Record<string, string | string[] | undefined> = {}
   const declaredHop = headerTokens(headers.connection)
   for (const [key, value] of Object.entries(headers)) {
     const lower = key.toLowerCase()
     if (HOP_BY_HOP.has(lower) || declaredHop.has(lower)) continue
+    if (lower === 'set-cookie') {
+      const values = Array.isArray(value) ? value : value === undefined ? [] : [value]
+      const kept = values.filter(item => !auth.isSessionSetCookie(item))
+      if (kept.length > 0) out[key] = kept
+      continue
+    }
     out[key] = value
   }
   return out
 }
 
-function writeSocketResponse(
+function writeSocketHead(
   socket: Duplex,
   statusCode: number,
   statusMessage: string,
@@ -97,8 +106,20 @@ function writeSocketResponse(
       lines.push(`${name}: ${value}`)
     }
   }
-  lines.push('Connection: close')
   socket.write(`${lines.join('\r\n')}\r\n\r\n`)
+}
+
+function writeSocketResponse(
+  socket: Duplex,
+  statusCode: number,
+  statusMessage: string,
+  headers: Record<string, string | string[] | undefined>,
+): void {
+  writeSocketHead(socket, statusCode, statusMessage, { ...headers, connection: 'close' })
+}
+
+function destroyResponse(res: ServerResponse): void {
+  if (!res.destroyed && !res.writableEnded) res.destroy()
 }
 
 export function proxyHttp(
@@ -114,12 +135,18 @@ export function proxyHttp(
     method: req.method,
     path: req.url,
     headers: forwardHeaders(req, target, auth, false),
+    agent: false,
   }, (upstreamRes) => {
     if (res.destroyed) {
       upstreamRes.destroy()
       return
     }
-    res.writeHead(upstreamRes.statusCode ?? 502, sanitizeResponseHeaders(upstreamRes.headers))
+    res.writeHead(upstreamRes.statusCode ?? 502, sanitizeResponseHeaders(upstreamRes.headers, auth))
+    upstreamRes.on('aborted', () => destroyResponse(res))
+    upstreamRes.on('error', (error) => {
+      logger.warn('token-gate: upstream response error: %s', String(error))
+      destroyResponse(res)
+    })
     upstreamRes.pipe(res)
   })
 
@@ -129,7 +156,7 @@ export function proxyHttp(
       res.writeHead(502)
       res.end()
     } else {
-      res.destroy()
+      destroyResponse(res)
     }
   })
 
@@ -153,14 +180,14 @@ export function proxyUpgrade(
     method: req.method,
     path: req.url,
     headers: forwardHeaders(req, target, auth, true),
+    agent: false,
   })
 
   upstream.on('upgrade', (upstreamRes: IncomingMessage, upstreamSocket: Duplex, upstreamHead: Buffer) => {
-    const lines = [`HTTP/1.1 101 ${upstreamRes.statusMessage ?? 'Switching Protocols'}`]
-    for (let i = 0; i + 1 < upstreamRes.rawHeaders.length; i += 2) {
-      lines.push(`${upstreamRes.rawHeaders[i]}: ${upstreamRes.rawHeaders[i + 1] ?? ''}`)
-    }
-    socket.write(`${lines.join('\r\n')}\r\n\r\n`)
+    const headers = sanitizeResponseHeaders(upstreamRes.headers, auth)
+    headers.connection = 'Upgrade'
+    if (typeof upstreamRes.headers.upgrade === 'string') headers.upgrade = upstreamRes.headers.upgrade
+    writeSocketHead(socket, 101, upstreamRes.statusMessage ?? 'Switching Protocols', headers)
     if (upstreamHead.length > 0) socket.write(upstreamHead)
     if (head.length > 0) upstreamSocket.write(head)
     upstreamSocket.pipe(socket)
@@ -180,8 +207,13 @@ export function proxyUpgrade(
       socket,
       upstreamRes.statusCode ?? 502,
       upstreamRes.statusMessage ?? 'Bad Gateway',
-      sanitizeResponseHeaders(upstreamRes.headers),
+      sanitizeResponseHeaders(upstreamRes.headers, auth),
     )
+    upstreamRes.on('aborted', () => socket.destroy())
+    upstreamRes.on('error', (error) => {
+      logger.warn('token-gate: upstream upgrade response error: %s', String(error))
+      socket.destroy()
+    })
     upstreamRes.pipe(socket, { end: true })
   })
 

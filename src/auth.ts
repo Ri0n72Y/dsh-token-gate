@@ -3,7 +3,6 @@ import type { IncomingMessage } from 'node:http'
 import type { Config } from './config.ts'
 
 interface Session {
-  createdAt: number
   expiresAt: number
   authority: string
 }
@@ -19,6 +18,7 @@ export interface AuthService {
   createSession(authority: string): string | undefined
   sessionCookie(id: string, secure: boolean): string
   stripSessionCookie(raw: string): string | undefined
+  isSessionSetCookie(raw: string): boolean
 }
 
 function tokenDigest(value: string): Buffer {
@@ -111,7 +111,7 @@ export function createAuthService(config: Config, token: string): AuthService {
       if (sessions.size >= config.sessionMax) return undefined
       const now = Date.now()
       const id = randomUUID()
-      sessions.set(id, { createdAt: now, expiresAt: now + ttlMs, authority })
+      sessions.set(id, { expiresAt: now + ttlMs, authority })
       return id
     },
 
@@ -127,6 +127,11 @@ export function createAuthService(config: Config, token: string): AuthService {
         return part.slice(0, eq).trim() !== config.cookieName
       })
       return kept.length > 0 ? kept.join('; ') : undefined
+    },
+
+    isSessionSetCookie(raw) {
+      const eq = raw.indexOf('=')
+      return eq !== -1 && raw.slice(0, eq).trim() === config.cookieName
     },
   }
 }

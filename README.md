@@ -21,14 +21,17 @@ browser / cloudflared / caddy
 关键约束：
 
 - 插件启动时检查 `webServer.host`，DSH 如果监听 `0.0.0.0` 会直接拒绝启动，避免绕过 gateway 直连 DSH。
+- gateway 自身默认只监听 `127.0.0.1:3081`。本机 Caddy/cloudflared 可直接连接；只有明确需要直接网络监听时才把 `bind` 改为 `0.0.0.0`。
 - session 绑定首次成功 bootstrap 的外部 authority；同一 cookie 换 Host 后不会继续生效。
-- 浏览器请求在内部改写前检查 `Origin` 与 `Host` 是否同源，并拒绝 `Sec-Fetch-Site: cross-site`。通过后才把 Host/Origin 改成 DSH loopback authority。
+- bootstrap 与普通浏览器请求都在内部改写前检查 `Origin` 与 `Host` 是否同源，并拒绝 `Sec-Fetch-Site: cross-site`。通过后才把 Host/Origin 改成 DSH loopback authority。
 - `allowIps` 仍经过 Host fence：IP literal/loopback authority 可直接使用；命名 authority 需要列入 `trustedHosts`，防 DNS rebinding。
-- forwarded headers 默认全部不可信。只有 TCP peer 明确列入 `trustedProxies` 后，`realIpHeader` 才参与客户端 IP 判定。
-- 默认 `realIpHeader=x-forwarded-for`，按右向左跳过可信代理链，避免客户端伪造左侧 XFF。`CF-Connecting-IP` 仅在显式配置该模式、且直接代理保证覆盖该头时使用。
-- gateway session cookie、外部 proxy identity headers 和 hop-by-hop headers 不会透传给 DSH；upstream response 的 hop-by-hop headers 同样清理。
+- forwarded headers 默认全部不可信。只有 TCP peer 明确列入 `trustedProxies` 后，`realIpHeader=x-forwarded-for` 才参与客户端 IP 判定。
+- `X-Forwarded-For` 按右向左跳过可信代理链，避免客户端伪造左侧 XFF。插件不再内置 CDN/厂商专用真实 IP 头模式；需要真实客户端地址时统一由可信本地代理规范化为 XFF。
+- gateway session cookie 固定带 `HttpOnly; SameSite=Lax`；只有可信入口通过 `X-Forwarded-Proto: https` 表明外部连接为 HTTPS 时才追加 `Secure`。gateway cookie 不会透传给 DSH，DSH 返回的同名 `Set-Cookie` 也会被过滤。
+- 外部 proxy identity headers 和 request/response hop-by-hop headers 不会透传。WebSocket 升级只重建必需的 `Connection: Upgrade` / `Upgrade` 头。
 - rate-limit identity 与 session store 都有硬上限，达到容量后 fail-closed。
-- Cordis activation 会等待端口真正监听；`EADDRINUSE` 等失败会让 effect/fiber 失败。dispose/HMR 会等待监听与升级 socket 关闭。
+- malformed URL、单请求处理异常、上游响应中断会被收敛到当前请求/连接，不应导致 gateway 进程退出或留下长期悬挂的下游响应。
+- Cordis activation 会等待端口真正监听；`EADDRINUSE` 等失败会让 effect/fiber 失败。dispose/HMR 只有在 listener 与当前 tracked client sockets（包括升级连接）真正关闭后才完成。
 
 404 响应固定为：
 
@@ -38,21 +41,27 @@ browser / cloudflared / caddy
 
 ## 首次登录
 
-推荐在 DSH 进程环境中设置：
+推荐在 DSH 进程环境中设置。当前测试环境为 Windows，PowerShell 示例：
 
-```sh
-export DSH_AUTH_TOKEN='replace-with-a-long-random-secret'
+```powershell
+$env:DSH_AUTH_TOKEN = 'replace-with-a-long-random-secret'
 ```
 
-访问：
+远程 HTTPS 入口访问：
 
 ```text
 https://dsh.example.com/?token=replace-with-a-long-random-secret
 ```
 
+本机直接开发也可以使用：
+
+```text
+http://127.0.0.1:3081/?token=replace-with-a-long-random-secret
+```
+
 只有根路径的 `token` query 属于 gateway。成功后返回 `303`、写入 HttpOnly session，并跳转到去掉 `token` 的干净 URL。`/chat?token=...`、`/api/...?...token=...` 等参数继续由 DSH/插件自己处理。
 
-远程部署必须使用 HTTPS。首次 `?token=` 会进入 HTTP request line，因此反代/CDN access log 应关闭 query-string 记录或对 `token` 参数脱敏。响应带 `Referrer-Policy: no-referrer`。
+远程部署应使用 HTTPS，并确保直接连接 gateway 的可信反向代理设置 `X-Forwarded-Proto: https`；此时 session cookie 会自动带 `Secure`。本机直接 HTTP 访问不会附加 `Secure`，以兼容常规 loopback 开发。首次 `?token=` 会进入 HTTP request line，因此反代/CDN access log 应关闭 query-string 记录或对 `token` 参数脱敏。响应带 `Referrer-Policy: no-referrer`。
 
 ## 反向代理与真实客户端 IP
 
@@ -67,13 +76,12 @@ https://dsh.example.com/?token=replace-with-a-long-random-secret
 
 `X-Forwarded-For` 会从最右侧开始解析：连续跳过 `trustedProxies`，第一个不可信地址才被视为真实客户端。缺失或含非法 IP 的 XFF 在可信代理模式下不会退回代理自身地址。
 
-Cloudflare 专用头需要显式选择：
+`realIpHeader` 只保留两种模式：
 
-```yaml
-realIpHeader: cf-connecting-ip
-```
+- `x-forwarded-for`：从显式可信代理链解析客户端地址。
+- `none`：完全忽略 forwarded client IP，直接使用 TCP peer。
 
-只有在 gateway 的直接 TCP peer 确实保证覆盖 `CF-Connecting-IP` 时使用该模式。通用 Caddy 不应仅因为运行在 localhost 就自动信任客户端传入的 CF 头。
+如果上游网络/CDN 提供自己的真实 IP 头，请让你控制的本地反向代理先把它规范化为 XFF；token-gate 本身保持厂商无关。
 
 ## IP allowlist 与 trustedHosts
 
@@ -91,35 +99,44 @@ trustedHosts: ['dsh.example.com']
 | 字段 | 默认值 | 说明 |
 |---|---:|---|
 | `token` | unset | bootstrap token；优先于 `DSH_AUTH_TOKEN` |
-| `cookieName` | `dsh_session` | HttpOnly session cookie 名，非法 cookie token 会拒绝加载 |
+| `cookieName` | `dsh_session` | HttpOnly session cookie 名；可信 HTTPS 入口自动追加 `Secure`；非法 cookie token 会拒绝加载 |
 | `sessionTtlDays` | `30` | session 有效期（天） |
 | `sessionMax` | `4096` | 内存 session 最大数量 |
 | `rateMax` | `10` | 每客户端每窗口最大 bootstrap 尝试次数 |
 | `rateWindowMinutes` | `15` | 限流窗口（分钟） |
 | `rateMaxKeys` | `2048` | 同一窗口最多追踪的限流 identity 数 |
 | `allowIps` | `[]` | 免 session 的客户端 IP/CIDR，支持 IPv4/IPv6 |
-| `trustedProxies` | `[]` | 可提供 forwarded headers 的直接/链式代理 CIDR |
+| `trustedProxies` | `[]` | 可提供 XFF / X-Forwarded-Proto 的直接/链式代理 CIDR |
 | `trustedHosts` | `[]` | IP allowlist 经命名 authority 访问时允许的 host[:port] |
-| `realIpHeader` | `x-forwarded-for` | `none` / `x-forwarded-for` / `cf-connecting-ip` |
+| `realIpHeader` | `x-forwarded-for` | `none` / `x-forwarded-for` |
 | `allowGeneratedToken` | `false` | 显式允许生成临时 token，仅建议开发使用 |
-| `bind` | `0.0.0.0` | gateway 监听地址 |
+| `bind` | `127.0.0.1` | gateway 监听地址；直接网络监听时显式改为 `0.0.0.0` |
 | `port` | `3081` | gateway 监听端口 |
 
 ## 请求转发
 
 授权后的 HTTP 请求流式转发；WebSocket 使用同一访问策略。浏览器边界检查完成后，gateway 将 `Host` 改成 `127.0.0.1:<DSH port>`；如果原请求有 `Origin`，会改成对应 loopback Origin，使 DSH 自身 trust fence 继续看到一致的内部 authority。外部 forwarded identity headers 会被删除。
 
-WebSocket upstream 如果拒绝升级并返回普通 HTTP（例如 426），gateway 会把该响应完整转回客户端；客户端在 upgrade header 后提前到达的 `head` 数据会等 upstream 101 后再写入升级 socket。
+请求与响应的 hop-by-hop header 会按代理边界清理。WebSocket upgrade 会重新生成 `Connection: Upgrade`，而不是透传客户端 `Connection` 中声明的其他 hop token。upstream 如果拒绝升级并返回普通 HTTP（例如 426），gateway 会把该响应转回客户端；客户端在 upgrade header 后提前到达的 `head` 数据会等 upstream 101 后再写入升级 socket。
+
+如果 DSH 响应意外中断，gateway 会同时结束对应下游连接，避免客户端一直等待一个永远不会完整结束的响应。插件卸载时，`gateway.close()` 会等待监听器和当前 tracked client sockets 都触发关闭后再完成，以符合 Cordis async disposer 的生命周期语义。
 
 ## 安装、测试与开发
 
 ```sh
 pnpm install
 pnpm run check
-pnpm run test:coverage
-npm pack --dry-run
+npm pack --dry-run --ignore-scripts
 dsh plugin --profile web add .
 ```
+
+需要查看测试盲点时，可以额外执行：
+
+```sh
+pnpm run test:coverage
+```
+
+覆盖率只作为诊断信息，不作为发布分数或门禁。测试应围绕插件可观察行为、非平凡解析/状态规则和已复现回归；不要为了提高覆盖率重复测试实现细节或模拟 Cordis 内部行为。
 
 开发期：
 
@@ -127,7 +144,7 @@ dsh plugin --profile web add .
 dsh web --patch /ABSOLUTE/PATH/TO/dsh-token-gate/cordis.dev.patch.yml
 ```
 
-CI 在 Linux 和 Windows 上执行 typecheck、覆盖率、build 与 tarball 检查；覆盖率门禁保持 lines 90%、branches 80%、functions 85%。
+当前测试版只以 Windows + Node 22 作为 CI 验证环境。只有出现明确的平台差异或扩大正式支持范围时，才增加额外平台/runtime job。
 
 ## License
 
