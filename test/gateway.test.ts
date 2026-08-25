@@ -4,9 +4,13 @@ import { createServer, request as httpRequest } from 'node:http'
 import type { Server } from 'node:http'
 import { connect } from 'node:net'
 import type { AddressInfo, Socket } from 'node:net'
-import { createGateway } from '../src/gateway.ts'
+import { createAuthService } from '../src/auth.ts'
 import type { Config } from '../src/config.ts'
+import { createGateway } from '../src/gateway.ts'
 import type { Gateway } from '../src/gateway.ts'
+import { createDeviceManagementService } from '../src/management.ts'
+import { createDeviceSessionService } from '../src/session.ts'
+import { authorizationState, MemoryAuthorizationRepository } from './helpers.ts'
 
 const TOKEN = 'test-token-0123456789abcdef'
 const IO_TIMEOUT_MS = 2000
@@ -14,10 +18,20 @@ const logs = { info() {}, warn() {}, error() {} }
 
 function baseConfig(overrides: Partial<Config> = {}): Config {
   return {
-    token: TOKEN, cookieName: 'dsh_session', sessionTtlDays: 30, sessionMax: 64,
-    rateMax: 4, rateWindowMinutes: 15, rateMaxKeys: 64, allowIps: [],
-    trustedProxies: ['127.0.0.1/32'], trustedHosts: [], realIpHeader: 'x-forwarded-for',
-    allowGeneratedToken: false, bind: '127.0.0.1', port: 0, ...overrides,
+    token: TOKEN,
+    cookieName: 'dsh_session',
+    pairingCookieName: 'dsh_pairing',
+    sessionTtlDays: 30,
+    renewalIntervalHours: 24,
+    pendingTtlMinutes: 15,
+    rateMax: 4,
+    rateWindowMinutes: 15,
+    rateMaxKeys: 64,
+    trustedProxies: ['127.0.0.1/32'],
+    allowGeneratedToken: false,
+    bind: '127.0.0.1',
+    port: 0,
+    ...overrides,
   }
 }
 
@@ -28,7 +42,7 @@ function request(port: number, path: string, options: { method?: string; headers
       port,
       path,
       method: options.method ?? 'GET',
-      headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.10', ...options.headers },
+      headers: { host: 'dsh.example.com', ...options.headers },
       agent: false,
     }, (res) => {
       const chunks: Buffer[] = []
@@ -88,10 +102,22 @@ function withinTimeout<T>(promise: Promise<T>, message: string): Promise<T> {
   })
 }
 
-async function startGateway(upstreamPort: number, config: Config = baseConfig()) {
-  const gateway = createGateway({ config, token: TOKEN, upstream: { host: '127.0.0.1', port: upstreamPort }, logger: logs })
+async function startGateway(
+  upstreamPort: number,
+  repository = new MemoryAuthorizationRepository(),
+  config: Config = baseConfig(),
+  now?: () => number,
+) {
+  const gateway = createGateway({
+    config,
+    token: TOKEN,
+    upstream: { host: '127.0.0.1', port: upstreamPort },
+    repository,
+    logger: logs,
+    now,
+  })
   await gateway.listen()
-  return { gateway, port: (gateway.server.address() as AddressInfo).port }
+  return { gateway, repository, port: (gateway.server.address() as AddressInfo).port }
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -107,83 +133,152 @@ async function closeFixture(gateway: Gateway, upstream: Server): Promise<void> {
   await closeServer(upstream)
 }
 
-async function bootstrap(port: number, headers: Record<string, string> = {}): Promise<string> {
-  const response = await request(port, '/?token=' + TOKEN, { headers })
-  assert.equal(response.status, 303)
-  const setCookie = response.headers['set-cookie']
-  assert.ok(Array.isArray(setCookie))
-  return setCookie[0].split(';')[0]
+function cookieFrom(headers: Record<string, string | string[] | undefined>, name: string): string {
+  const values = headers['set-cookie']
+  assert.ok(Array.isArray(values))
+  const found = values.find(value => value.startsWith(`${name}=`))
+  assert.ok(found)
+  return found.split(';')[0]
 }
 
-test('bootstrap creates a session and authorized HTTP requests reach DSH', async (t) => {
+async function pair(port: number, headers: Record<string, string> = {}): Promise<string> {
+  const response = await request(port, `/?token=${TOKEN}`, { headers })
+  assert.equal(response.status, 303)
+  assert.match(String(response.headers.location), /^\/_token-gate\/wait\?returnTo=/)
+  return cookieFrom(response.headers, 'dsh_pairing')
+}
+
+async function authorize(port: number, repository: MemoryAuthorizationRepository): Promise<string> {
+  const pairingCookie = await pair(port)
+  const pending = repository.listPending()
+  assert.equal(pending.length, 1)
+  assert.ok(await repository.approvePending(pending[0].id))
+  const status = await request(port, '/_token-gate/status', { headers: { cookie: pairingCookie } })
+  assert.equal(status.status, 200)
+  assert.deepEqual(JSON.parse(status.body), { state: 'approved' })
+  return cookieFrom(status.headers, 'dsh_session')
+}
+
+test('token pairing stays pending until host approval, then proxies with isolated cookies', async (t) => {
   const seen: Array<{ path?: string; cookie?: string }> = []
   const upstream = createServer((req, res) => {
     seen.push({ path: req.url, cookie: req.headers.cookie })
     res.writeHead(200, {
       'Content-Type': 'text/plain',
-      'Set-Cookie': ['dsh_session=replace-me; Path=/', 'app_session=keep-me; Path=/'],
+      'Set-Cookie': [
+        'dsh_session=replace-me; Path=/',
+        'dsh_pairing=replace-me-too; Path=/',
+        'app_session=keep-me; Path=/',
+      ],
     })
     res.end('DSH APP')
   })
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   const upstreamPort = (upstream.address() as AddressInfo).port
-  const { gateway, port } = await startGateway(upstreamPort)
+  const { gateway, repository, port } = await startGateway(upstreamPort)
   t.after(() => closeFixture(gateway, upstream))
 
   const malformed = await rawRequest(port, 'GET //[bad HTTP/1.1\r\nHost: dsh.example.com\r\nConnection: close\r\n\r\n')
   assert.match(malformed, /^HTTP\/1\.1 404 /)
+  assert.equal((await request(port, '/')).status, 404)
+  assert.equal((await request(port, `/chat?token=${TOKEN}`)).status, 404)
+  assert.equal((await request(port, '/__token-gate/devices')).status, 404)
 
-  const denied = await request(port, '/')
-  assert.equal(denied.status, 404)
-  assert.equal(denied.body, '404 page not found\n')
-  assert.equal((await request(port, '/chat?token=' + TOKEN)).status, 404)
-
-  const login = await request(port, '/?token=' + TOKEN + '&view=compact', { headers: { 'x-forwarded-proto': 'https' } })
+  const login = await request(port, `/?token=${TOKEN}&view=compact`, {
+    headers: { 'x-forwarded-proto': 'https', 'user-agent': 'Test Browser' },
+  })
   assert.equal(login.status, 303)
-  assert.equal(login.headers.location, '/?view=compact')
-  const setCookie = login.headers['set-cookie']
-  assert.ok(Array.isArray(setCookie))
-  assert.match(setCookie[0], /HttpOnly/)
-  const sessionCookie = setCookie[0].split(';')[0]
+  assert.equal(login.headers.location, '/_token-gate/wait?returnTo=%2F%3Fview%3Dcompact')
+  const pairingCookie = cookieFrom(login.headers, 'dsh_pairing')
+  const pairingSetCookie = (login.headers['set-cookie'] as string[])[0]
+  assert.match(pairingSetCookie, /HttpOnly/)
+  assert.match(pairingSetCookie, /;\s*Secure\b/i)
+  assert.equal(repository.listPending().length, 1)
+  assert.equal(seen.length, 0)
 
-  const proxied = await request(port, '/chat?token=app-value', { headers: { cookie: `${sessionCookie}; app_cookie=keep-me` } })
+  assert.equal((await request(port, '/_token-gate/wait?returnTo=%2F', { headers: { cookie: pairingCookie } })).status, 200)
+  const waiting = await request(port, '/_token-gate/status', { headers: { cookie: pairingCookie } })
+  assert.equal(waiting.status, 202)
+  assert.deepEqual(JSON.parse(waiting.body), { state: 'pending' })
+  assert.equal(seen.length, 0)
+
+  const pending = repository.listPending()[0]
+  assert.ok(await repository.approvePending(pending.id))
+  const approved = await request(port, '/_token-gate/status', { headers: { cookie: pairingCookie } })
+  assert.equal(approved.status, 200)
+  const sessionCookie = cookieFrom(approved.headers, 'dsh_session')
+  assert.equal(repository.listDevices().length, 1)
+
+  const proxied = await request(port, '/chat?token=app-value', {
+    headers: { cookie: `${sessionCookie}; ${pairingCookie}; app_cookie=keep-me` },
+  })
   assert.equal(proxied.status, 200)
   assert.equal(proxied.body, 'DSH APP')
   assert.deepEqual(proxied.headers['set-cookie'], ['app_session=keep-me; Path=/'])
   assert.deepEqual(seen, [{ path: '/chat?token=app-value', cookie: 'app_cookie=keep-me' }])
 })
 
-test('session cookie uses Secure only for HTTPS ingress', async (t) => {
+test('authorized device survives gateway recreation, revocation invalidates it, and pairing can start again', async (t) => {
   const upstream = createServer((_req, res) => res.end('ok'))
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   const upstreamPort = (upstream.address() as AddressInfo).port
-  const { gateway, port } = await startGateway(upstreamPort)
-  t.after(() => closeFixture(gateway, upstream))
+  const state = authorizationState()
+  const firstRepository = new MemoryAuthorizationRepository(state)
+  const first = await startGateway(upstreamPort, firstRepository)
+  const sessionCookie = await authorize(first.port, firstRepository)
+  assert.equal((await request(first.port, '/', { headers: { cookie: sessionCookie } })).status, 200)
+  await first.gateway.close()
 
-  const local = await request(port, '/?token=' + TOKEN)
-  assert.equal(local.status, 303)
-  const localCookie = local.headers['set-cookie']
-  assert.ok(Array.isArray(localCookie))
-  assert.doesNotMatch(localCookie[0], /;\s*Secure\b/i)
+  const reopenedRepository = new MemoryAuthorizationRepository(state)
+  const reopened = await startGateway(upstreamPort, reopenedRepository)
+  t.after(() => closeFixture(reopened.gateway, upstream))
+  assert.equal((await request(reopened.port, '/', { headers: { cookie: sessionCookie } })).status, 200)
 
-  const https = await request(port, '/?token=' + TOKEN, { headers: { 'x-forwarded-proto': 'https' } })
-  assert.equal(https.status, 303)
-  const httpsCookie = https.headers['set-cookie']
-  assert.ok(Array.isArray(httpsCookie))
-  assert.match(httpsCookie[0], /;\s*Secure\b/i)
+  const device = reopenedRepository.listDevices()[0]
+  const management = createDeviceManagementService(reopenedRepository)
+  assert.equal(await management.revoke(device.id), true)
+  assert.equal((await request(reopened.port, '/', { headers: { cookie: sessionCookie } })).status, 404)
+
+  const newPairing = await pair(reopened.port)
+  assert.match(newPairing, /^dsh_pairing=/)
+  assert.equal(reopenedRepository.listPending().length, 1)
 })
 
-test('configured IP allowlist can bypass the session', async (t) => {
-  let hits = 0
-  const upstream = createServer((_req, res) => { hits += 1; res.end('ok') })
-  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
-  const upstreamPort = (upstream.address() as AddressInfo).port
-  const { gateway, port } = await startGateway(upstreamPort, baseConfig({ allowIps: ['203.0.113.0/24'] }))
-  t.after(() => closeFixture(gateway, upstream))
+test('sliding expiry renews durably only after the configured threshold', async () => {
+  const config = baseConfig()
+  const repository = new MemoryAuthorizationRepository()
+  const auth = createAuthService(config, TOKEN)
+  let clock = 1_000_000
+  const session = createDeviceSessionService(config, auth, repository, () => clock)
+  const pairingBearer = 'pairing-bearer-for-renewal'
+  const pairingId = auth.digestBearer(pairingBearer)
+  await repository.putPending(pairingId, {
+    authority: 'dsh.example.com',
+    browser: 'Test Browser',
+    requestedAt: clock,
+    expiresAt: clock + 60 * 60 * 1000,
+    state: 'approved',
+    approvedAt: clock,
+  })
+  const pending = repository.getPending(pairingId)
+  assert.ok(pending)
+  const issued = await session.issueApprovedSession(pairingBearer, pairingId, pending, false)
+  const original = repository.getDevice(issued.deviceId)
+  assert.ok(original)
 
-  assert.equal((await request(port, '/', { headers: { host: '192.0.2.10:3081', 'x-forwarded-for': '203.0.113.9' } })).status, 200)
-  assert.equal((await request(port, '/', { headers: { host: '192.0.2.10:3081', 'x-forwarded-for': '198.51.100.9' } })).status, 404)
-  assert.equal(hits, 1)
+  clock += 12 * 60 * 60 * 1000
+  assert.equal((await session.validate(issued.bearer, 'dsh.example.com', false)).allowed, true)
+  assert.equal(repository.renewWrites, 0)
+
+  clock += 12 * 60 * 60 * 1000
+  const renewed = await session.validate(issued.bearer, 'dsh.example.com', false)
+  assert.equal(renewed.allowed, true)
+  assert.ok(renewed.allowed && renewed.refreshCookie?.startsWith('dsh_session='))
+  assert.equal(repository.renewWrites, 1)
+  assert.ok((repository.getDevice(issued.deviceId)?.expiresAt ?? 0) > original.expiresAt)
+
+  await session.validate(issued.bearer, 'dsh.example.com', false)
+  assert.equal(repository.renewWrites, 1)
 })
 
 test('upstream body abort terminates the downstream response', async (t) => {
@@ -194,15 +289,15 @@ test('upstream body abort terminates the downstream response', async (t) => {
   })
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   const upstreamPort = (upstream.address() as AddressInfo).port
-  const { gateway, port } = await startGateway(upstreamPort)
+  const { gateway, repository, port } = await startGateway(upstreamPort)
   t.after(() => closeFixture(gateway, upstream))
-  const sessionCookie = await bootstrap(port)
+  const sessionCookie = await authorize(port, repository)
 
   const outcome = await new Promise<'aborted' | 'ended'>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('downstream response did not terminate after upstream abort')), IO_TIMEOUT_MS)
     const settle = (value: 'aborted' | 'ended') => { clearTimeout(timer); resolve(value) }
     const fail = (error: Error) => { clearTimeout(timer); reject(error) }
-    const req = httpRequest({ host: '127.0.0.1', port, path: '/', headers: { host: 'dsh.example.com', 'x-forwarded-for': '203.0.113.10', cookie: sessionCookie }, agent: false }, (res) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path: '/', headers: { host: 'dsh.example.com', cookie: sessionCookie }, agent: false }, (res) => {
       res.resume()
       res.once('aborted', () => settle('aborted'))
       res.once('error', () => settle('aborted'))
@@ -214,7 +309,7 @@ test('upstream body abort terminates the downstream response', async (t) => {
   assert.equal(outcome, 'aborted')
 })
 
-test('WebSocket relays rejection, early data, and closes the client on gateway dispose', async (t) => {
+test('WebSocket relays rejection and early data, and gateway disposal closes the client', async (t) => {
   const upstreamSockets = new Set<import('node:stream').Duplex>()
   const upstream = createServer()
   let upgradedClient: Socket | undefined
@@ -230,14 +325,14 @@ test('WebSocket relays rejection, early data, and closes the client on gateway d
   })
   await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
   const upstreamPort = (upstream.address() as AddressInfo).port
-  const { gateway, port } = await startGateway(upstreamPort)
+  const { gateway, repository, port } = await startGateway(upstreamPort)
   t.after(async () => {
     upgradedClient?.destroy()
     for (const socket of upstreamSockets) socket.destroy()
     await closeServer(gateway.server)
     await closeServer(upstream)
   })
-  const sessionCookie = await bootstrap(port)
+  const sessionCookie = await authorize(port, repository)
 
   const rejected = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
     const req = httpRequest({ host: '127.0.0.1', port, path: '/reject', headers: { host: 'dsh.example.com', cookie: sessionCookie, origin: 'http://dsh.example.com', connection: 'Upgrade', upgrade: 'websocket' }, agent: false })
