@@ -24,7 +24,7 @@ export class MemoryAuthorizationRepository implements AuthorizationRepository {
 
   listPending(now = Date.now()) {
     return [...this.state.pending.entries()]
-      .filter(([, item]) => item.state === 'pending' && item.expiresAt > now)
+      .filter(([, item]) => item.issuedDeviceId === undefined && item.expiresAt > now)
       .map(([id, record]) => ({ id, record }))
       .sort((a, b) => b.record.requestedAt - a.record.requestedAt)
   }
@@ -35,18 +35,9 @@ export class MemoryAuthorizationRepository implements AuthorizationRepository {
 
   async approvePending(id: string, now = Date.now()): Promise<PendingDeviceRecord | undefined> {
     const current = this.state.pending.get(id)
-    if (current === undefined || current.expiresAt <= now) return undefined
+    if (current === undefined || current.expiresAt <= now || current.issuedDeviceId !== undefined) return undefined
     if (current.state === 'approved') return current
     const next = { ...current, state: 'approved' as const, approvedAt: now }
-    this.state.pending.set(id, next)
-    return next
-  }
-
-  async markPendingIssued(id: string, deviceId: string): Promise<PendingDeviceRecord | undefined> {
-    const current = this.state.pending.get(id)
-    if (current === undefined || current.state !== 'approved') return undefined
-    if (current.issuedDeviceId !== undefined && current.issuedDeviceId !== deviceId) return undefined
-    const next = { ...current, issuedDeviceId: deviceId }
     this.state.pending.set(id, next)
     return next
   }
@@ -70,8 +61,20 @@ export class MemoryAuthorizationRepository implements AuthorizationRepository {
       .sort((a, b) => b.record.lastSeenAt - a.record.lastSeenAt)
   }
 
-  async putDevice(id: string, record: AuthorizedDeviceRecord): Promise<void> {
-    this.state.devices.set(id, record)
+  async issueDevice(pairingId: string, deviceId: string, record: AuthorizedDeviceRecord): Promise<AuthorizedDeviceRecord | undefined> {
+    const pairing = this.state.pending.get(pairingId)
+    if (pairing === undefined || pairing.state !== 'approved') return undefined
+    if (pairing.issuedDeviceId !== undefined && pairing.issuedDeviceId !== deviceId) return undefined
+    const existing = this.state.devices.get(deviceId)
+    if (existing !== undefined) {
+      if (existing.pairingId !== pairingId || existing.authority !== record.authority) return undefined
+    } else {
+      this.state.devices.set(deviceId, record)
+    }
+    if (pairing.issuedDeviceId === undefined) {
+      this.state.pending.set(pairingId, { ...pairing, issuedDeviceId: deviceId })
+    }
+    return this.state.devices.get(deviceId) ?? record
   }
 
   async renewDevice(id: string, record: AuthorizedDeviceRecord): Promise<void> {
@@ -79,8 +82,11 @@ export class MemoryAuthorizationRepository implements AuthorizationRepository {
     this.state.devices.set(id, record)
   }
 
-  async revokeDevice(id: string): Promise<boolean> {
-    return this.state.devices.delete(id)
+  async revokeAuthorization(deviceId: string): Promise<boolean> {
+    const item = this.state.devices.get(deviceId)
+    if (item === undefined) return false
+    this.state.pending.delete(item.pairingId)
+    return this.state.devices.delete(deviceId)
   }
 
   async close(): Promise<void> {}
