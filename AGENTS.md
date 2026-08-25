@@ -2,7 +2,7 @@
 
 ## Scope
 
-`dsh-token-gate` is a minimal authenticated browser entry point in front of DSH Web. It should remain smaller than a general authentication platform, reverse proxy, firewall, or WAF.
+`dsh-token-gate` is a minimal host-controlled browser entry point in front of DSH Web. It should remain smaller than a general authentication platform, reverse proxy, firewall, or WAF.
 
 ## Spec Driven Development
 
@@ -18,20 +18,24 @@ If code and Spec disagree, do not rewrite upstream intent merely to match existi
 
 ## Core architectural invariants
 
-- DSH Web remains bound to loopback; token-gate is the browser-facing entry boundary.
-- Bootstrap exchanges a configured secret for a browser session and removes the secret from the visible URL.
-- A valid browser session survives plugin/process recreation until its configured expiry.
-- Durable session state uses the DSH/Cordis storage-domain capability rather than a parallel persistence framework.
+- DSH Web remains bound to loopback; token-gate is the remote browser-facing entry boundary.
+- A bootstrap secret starts a **pending device-authorization request**; possession of the secret alone does not grant DSH access.
+- The bootstrap secret is removed from the visible URL before the browser waits for host approval.
+- The host approves/rejects pending devices and revokes authorized devices through a simple local DSH Web client/settings surface.
+- Only an approved device receives a long-lived authorizing session.
+- Authorized device state survives plugin/process recreation and uses the DSH/Cordis storage-domain capability rather than a parallel persistence framework.
+- Device sessions use sliding inactivity expiry; renewal is coalesced to roughly the first valid request after one day instead of writing durable state on every request.
+- Host revocation invalidates the current session; the device may pair again only through bootstrap token + new host approval.
 - Authorized HTTP and WebSocket traffic stays transparent to DSH application behavior.
-- Gateway credentials do not leak upstream to DSH.
-- HTTP and WebSocket share the same authorization contract.
-- Cordis activation/disposal owns listener, connection, and opened-storage-domain lifecycle.
+- Gateway pairing/session credentials do not leak upstream to DSH.
+- HTTP and WebSocket share the same device authorization contract.
+- Cordis activation/disposal owns listener, connection, and opened-authorization-domain lifecycle.
 - IP allowlist authentication is not part of the current product Requirement. Do not expand or test that surface unless Requirement is changed first.
 
 ## Testing discipline
 
-- Add tests only when they protect user-observable behavior, durable state/lifecycle transitions, non-trivial protocol/state logic, reproduced regressions, or real DSH/Cordis contracts.
-- Do not simulate Cordis/storage internals merely to claim framework integration coverage when a real DSH profile is the meaningful contract.
+- Add tests only when they protect user-observable pairing/access behavior, durable authorization/lifecycle transitions, sliding-expiry/revocation state logic, non-trivial protocol logic, reproduced regressions, or real DSH/Cordis contracts.
+- Do not simulate Cordis/storage/client-runtime internals merely to claim framework integration coverage when a real DSH Web profile is the meaningful contract.
 - Do not duplicate the same invariant at multiple test layers without independent failure value.
 - Coverage percentage, test count, CI job count, and platform-matrix size are diagnostic/operational choices, not quality goals.
 - The current supported validation target is Windows + Node 22; broaden it only for a real support target or reproduced platform-specific issue.
@@ -45,4 +49,4 @@ pnpm run check
 npm pack --dry-run --ignore-scripts
 ```
 
-For DSH/Cordis/storage integration changes, also run the real Web-profile acceptance flow in `spec/verification.md`.
+For DSH/Cordis/storage/client integration changes, also run the real Web-profile acceptance flow in `spec/verification.md`.
