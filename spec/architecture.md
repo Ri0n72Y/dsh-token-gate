@@ -6,72 +6,92 @@ This document defines the intended structure used to satisfy the product Require
 
 ## Design principles
 
-1. **DSH stays private.** DSH Web remains on loopback; token-gate is the browser-facing boundary.
-2. **Proxy, do not invade DSH internals.** Authorized traffic uses DSH's existing HTTP/WebSocket surface instead of modifying agent/session/UI internals.
-3. **Persist authorization through the host storage seam.** Browser sessions must survive token-gate/DSH process recreation until expiry.
-4. **Use DSH/Cordis services before inventing parallel infrastructure.** Lifecycle comes from Cordis, upstream discovery from `webServer`, and durable state from DSH `storageDomain`.
-5. **Keep the product smaller than a general auth platform.** Network allowlists, user accounts, and provider-specific proxy logic are outside the current architecture.
+1. **DSH stays private.** DSH Web remains on loopback; token-gate is the remote browser-facing boundary.
+2. **Host controls trust.** Possessing the bootstrap secret may request access, but an unapproved remote device cannot reach DSH.
+3. **Proxy, do not invade DSH internals.** Authorized traffic uses DSH's existing HTTP/WebSocket surface.
+4. **Persist authorization through the host storage seam.** Device authorization and sessions survive process recreation.
+5. **Use sliding inactivity expiry without hot writes.** Active sessions renew, but durable refreshes are coalesced to roughly once per day.
+6. **Use DSH/Cordis services before inventing parallel infrastructure.** Lifecycle comes from Cordis, upstream discovery from `webServer`, durable state from `storageDomain`, and the host UI uses DSH's client/settings extension surface.
+7. **Keep the product smaller than a general auth platform.** Network allowlists, user accounts, and provider-specific proxy logic are outside the current architecture.
 
 ## C4 Level 1 — System context
 
 ```mermaid
 flowchart LR
-    U["Person: DSH user\nUses DSH through a browser"]
+    RU["Person: remote DSH user\nRequests device authorization"]
+    HO["Person: host operator\nApproves/revokes devices locally"]
     RP["Optional deployment proxy\nTLS termination / local forwarding"]
-    TG["Software system: dsh-token-gate\nBootstrap secret -> durable browser session\nHTTP/WebSocket access gate"]
-    DSH["External software system: DSH Web\nLoopback-only application server"]
+    TG["Software system: dsh-token-gate\nPairing + durable device sessions\nHTTP/WebSocket access gate"]
+    DSH["External software system: DSH Web\nLoopback-only application + host admin UI"]
     STORE["DSH durable storage capability\nHost-managed local persistence"]
 
-    U -->|HTTPS/HTTP + WebSocket| RP
-    U -. local development .->|HTTP + WebSocket| TG
+    RU -->|HTTPS/HTTP + WebSocket| RP
+    RU -. direct local/dev .->|HTTP + WebSocket| TG
     RP -->|HTTP/WS| TG
     TG -->|authorized, sanitized HTTP/WS| DSH
-    TG -->|session records| STORE
+    TG -->|pending requests + device sessions| STORE
+    HO -->|loopback DSH Web| DSH
+    DSH -->|token-gate management card/actions| TG
 ```
 
-The optional deployment proxy is infrastructure, not part of the authentication model. Token-gate owns the authorization decision regardless of whether the browser reaches it directly or through a local reverse proxy.
+The optional deployment proxy is infrastructure, not part of the authorization model. The host administration path remains local through loopback DSH Web; the device list and approval controls are not exposed as a public remote management application.
 
 ## C4 Level 2 — Runtime containers
 
 ```mermaid
 flowchart LR
-    B["Browser"]
+    RB["Remote browser"]
+    HB["Host browser"]
     RP["Optional Caddy / cloudflared"]
 
     subgraph PROC[DSH process / Cordis application]
         C["Cordis runtime\nplugin lifecycle"]
-        TG["token-gate plugin\ncomposition root"]
-        G["Gateway HTTP server\nseparate listener"]
+        TG["token-gate Host plugin\ncomposition root"]
+        G["Gateway HTTP server\nremote access + minimal pairing surface"]
+        MGMT["Device management service\napprove / reject / revoke / list"]
+        CLIENT["token-gate dsh.client card\nPlugins settings UI"]
         W["DSH webServer\n127.0.0.1:<port>"]
         SD["ctx.storageDomain\ntyped durable state facility"]
 
         C -->|effect lifecycle| TG
         TG -->|create / listen / dispose| G
+        TG -->|host operations| MGMT
         TG -->|resolve upstream| W
-        TG -->|open token-gate session domain| SD
-        G -->|HTTP / WebSocket proxy| W
+        TG -->|open token-gate auth domain| SD
+        G -->|authorized HTTP / WebSocket| W
+        CLIENT -->|DSH client/remote seam| MGMT
     end
 
     MEDIUM[("Host-selected local storage backend\nWeb profile currently routes storageDomain to JSON")]
 
-    B --> RP
-    B -. direct local .-> G
+    RB --> RP
     RP --> G
+    RB -. direct local/dev .-> G
+    HB -->|loopback| W
+    W -->|serves token-gate client plugin| CLIENT
     SD -->|durable writes / reload on next process| MEDIUM
 ```
 
-Token-gate does **not** own a standalone database process. It consumes the DSH storage-domain capability and therefore follows the storage backend selected by the host profile. The Web profile already provides storage and a local backend; another profile may route the same domain differently.
+The token-gate package therefore has two faces:
+
+- a **Host face** that owns the gateway, authorization state, storage, and management operations;
+- a **Web client face** that renders a small device-management card inside DSH Web settings.
+
+This follows DSH's existing plugin-client/settings model instead of creating another standalone administration site.
 
 ## Main component boundaries
 
 ```mermaid
 flowchart LR
     IDX["Plugin composition\nCordis apply / dependency wiring"]
-    CFG["Configuration\nbootstrap secret, cookie/session lifetime, listener"]
-    GW["Gateway transport\nNode HTTP listener + connection lifecycle"]
-    ACCESS["Access gate\nbootstrap vs session vs deny"]
-    AUTH["Session service\nsecret verification + session semantics"]
-    REPO["Session repository\ndurable session records"]
+    CFG["Configuration\nsecret, session lifetime, listener"]
+    GW["Gateway transport\nNode HTTP listener + pairing surface"]
+    ACCESS["Access gate\npairing vs device session vs deny"]
+    PAIR["Pairing service\nbootstrap secret + pending requests"]
+    SESS["Device session service\nvalidation + sliding renewal"]
+    REPO["Authorization repository\npending + authorized devices"]
+    MGMT["Management service\nlist / approve / reject / revoke"]
+    CARD["DSH Web settings card"]
     PROXY["Proxy transport\nHTTP + WebSocket forwarding"]
     DSH["Injected DSH webServer"]
     STORAGE["Injected storageDomain"]
@@ -80,8 +100,12 @@ flowchart LR
     IDX --> GW
     IDX --> REPO
     GW --> ACCESS
-    ACCESS --> AUTH
-    AUTH --> REPO
+    ACCESS --> PAIR
+    ACCESS --> SESS
+    PAIR --> REPO
+    SESS --> REPO
+    MGMT --> REPO
+    CARD --> MGMT
     GW --> PROXY
     PROXY --> DSH
     REPO --> STORAGE
@@ -89,101 +113,131 @@ flowchart LR
 
 ### Ownership
 
-- **Composition** owns Cordis integration and service acquisition.
-- **Gateway transport** owns the public listener and accepted client sockets.
-- **Access gate** decides only `bootstrap`, `allow`, or `deny` from request metadata and session state.
-- **Session service** owns bootstrap verification, cookie/session semantics, expiry, and authority binding.
-- **Session repository** owns durable storage of session records through `ctx.storageDomain`.
-- **Proxy transport** owns protocol forwarding and HTTP/WebSocket sanitization; it does not decide authentication.
+- **Gateway transport** owns the remote listener, minimal pending-approval surface, and accepted client sockets.
+- **Pairing service** owns bootstrap-secret verification and creation/resolution of pending device requests.
+- **Device session service** owns session bearers, authority binding, expiry, sliding renewal, and cookie semantics.
+- **Authorization repository** owns durable pending requests and authorized-device records through `ctx.storageDomain`.
+- **Management service** owns host actions over authorization state.
+- **DSH Web settings card** is only a presentation surface for the host; it does not own authorization state.
+- **Proxy transport** forwards already-authorized HTTP/WebSocket traffic and does not decide authorization.
 
 No IP allowlist component belongs to the current core design.
 
-## Persistent session design
+## Durable authorization model
 
-### Storage seam
+Token-gate opens one dedicated storage domain through `ctx.storageDomain`.
 
-Token-gate opens one dedicated DSH storage domain through `ctx.storageDomain` during plugin activation.
-
-The domain contains a `sessions` table. Conceptually:
+The domain has two conceptual tables.
 
 ```text
-SessionRecord {
+PendingDeviceRecord {
   authority: string
+  label?: string
+  browser?: string
+  requestedAt: number
   expiresAt: number
+  state: "pending" | "approved"
+}
+
+AuthorizedDeviceRecord {
+  authority: string
+  label?: string
+  browser?: string
+  createdAt: number
+  lastSeenAt: number
+  expiresAt: number
+  renewAfter: number
 }
 ```
 
-The session cookie carries an opaque random bearer value. The durable table key should be a stable one-way digest derived from that bearer value so the raw cookie credential does not need to be stored as durable data.
+Keys are stable one-way digests of opaque browser bearers. Raw pairing/session bearer values do not need to be persisted.
 
-### Durability rule
+### Pairing flow
 
-A successful bootstrap must persist the new session record **before** returning the `303` response and cookie. Once the browser receives a successful bootstrap response, immediate process restart must not invalidate that newly issued session.
+1. The browser requests `/?token=<secret>`.
+2. The gateway validates the secret and browser boundary.
+3. A short-lived opaque pairing bearer is generated and its pending record is durably written.
+4. The bootstrap secret is removed from the visible URL immediately; the browser receives only the temporary pairing state required to wait for approval.
+5. The host settings card lists the pending request.
+6. The host approves or rejects it.
+7. After approval, the browser's next pairing poll/request exchanges the approved pending state for a durable authorized-device session, deletes/consumes the pending request, sets the long-lived HttpOnly session cookie, and redirects to the clean DSH route.
 
-### Read path
+A rejected, expired, or missing pending request cannot become a session.
 
-The storage-domain facility loads durable records when the domain opens and serves reads from its authoritative in-memory view. Normal request authorization therefore does not require opening a database/file per HTTP request.
+The public pairing surface should remain minimal: it needs only enough UI/protocol to indicate that host approval is pending and to detect approval/rejection. It is not a general login/status application.
 
-For each request:
+### Sliding session renewal
 
-1. read the cookie bearer value;
-2. derive the repository key;
-3. resolve the persisted session record;
-4. reject absent or expired records;
-5. require the recorded external authority to match the current request authority.
+An authorized device record uses inactivity expiry.
 
-Expired-record cleanup may be lazy. Expiry enforcement is part of the authorization contract; the exact cleanup schedule is not.
+For every authorized request:
+
+1. resolve the persisted device record from the session bearer digest;
+2. deny if absent, expired, revoked/deleted, or bound to a different authority;
+3. allow the request when valid;
+4. if `now >= renewAfter`, durably update `expiresAt`, `lastSeenAt`, and `renewAfter`, then refresh the browser cookie lifetime.
+
+The intended default refresh interval is roughly 24 hours. Therefore ordinary traffic performs reads from the storage-domain in-memory view, while an active device normally causes at most one durable renewal write per day.
+
+A renewal write failure does not create a longer session than durable state proves. The current request may continue under the still-valid existing deadline, but no refreshed cookie/deadline is issued until the durable update succeeds.
+
+### Revocation
+
+Host revocation removes or marks the authorized-device record invalid. The next request using that session bearer is denied.
+
+Revocation is not a permanent ban. A revoked device can present the bootstrap secret again, create a new pending request, and become authorized again only after host approval.
 
 ### Lifecycle
 
-The token-gate consumer owns its opened domain handle and closes it during Cordis disposal. Closing the domain releases runtime resources but **does not delete persisted session records**. On the next plugin/process instance, reopening the same domain restores still-valid sessions.
+Closing the token-gate storage-domain handle releases runtime resources but does not delete valid authorization records. Reopening the same domain after process restart restores pending/authorized state subject to expiry.
 
-The persistence backend and its physical location remain host concerns rather than token-gate configuration.
+The persistence backend and physical location remain host concerns.
 
 ## Data-flow diagram
 
 ```mermaid
 flowchart LR
-    B["External entity\nBrowser"]
-    RP["External entity\nOptional deployment proxy"]
-    PARSE["1. Parse external authority / trusted scheme"]
+    RB["Remote browser"]
+    HB["Host browser"]
+    RP["Optional deployment proxy"]
+    PARSE["1. Parse authority / trusted scheme"]
     ACCESS["2. Access decision"]
-    BOOT["3. Bootstrap verification"]
-    SESS["4. Session lookup / creation"]
-    PX["5. Sanitize + proxy HTTP/WS"]
-    DS[("Durable token-gate session domain")]
-    DSH["External entity\nDSH Web on loopback"]
+    PAIR["3. Pairing request / wait"]
+    SESS["4. Device session validate / renew"]
+    MGMT["5. Host device management"]
+    PX["6. Sanitize + proxy HTTP/WS"]
+    DS[("Durable token-gate authorization domain")]
+    DSH["DSH Web on loopback"]
 
-    B --> RP
-    B -. local .-> PARSE
+    RB --> RP
+    RB -. local/dev .-> PARSE
     RP --> PARSE
     PARSE --> ACCESS
-    ACCESS -->|root bootstrap| BOOT
-    BOOT -->|valid secret| SESS
-    SESS -->|durable put before success| DS
-    DS -->|lookup persisted session| SESS
-    SESS -->|valid authority + expiry| ACCESS
+    ACCESS -->|valid root token| PAIR
+    PAIR -->|pending record| DS
+    DS -->|pending state| PAIR
+    PAIR -->|clean pending surface| RB
+
+    HB -->|loopback DSH Web settings| MGMT
+    MGMT -->|list / approve / reject / revoke| DS
+
+    ACCESS -->|session cookie| SESS
+    DS -->|device record| SESS
+    SESS -->|daily/coalesced renewal| DS
+    SESS -->|valid| ACCESS
     ACCESS -->|allow| PX
-    ACCESS -->|deny| B
-    SESS -->|303 + HttpOnly cookie| B
+    ACCESS -->|deny| RB
+
     PX -->|sanitized HTTP/WS| DSH
     DSH -->|response / upgrade| PX
-    PX -->|transparent response / stream| B
+    PX -->|transparent response / stream| RB
 ```
-
-### Sensitive-data flow
-
-The bootstrap secret is used only to authorize bootstrap and must not be proxied to DSH. The session cookie is consumed by token-gate and removed before forwarding. Persisted session state contains the authorization metadata required to validate a cookie across restarts; the raw session bearer need not be persisted.
 
 ## UML class/dependency view
 
 ```mermaid
 classDiagram
-    class TokenGatePlugin {
-      +apply(ctx, config) Promise~void~
-    }
-
     class Gateway {
-      +server Server
       +listen() Promise~void~
       +close() Promise~void~
     }
@@ -192,114 +246,131 @@ classDiagram
       +decide(request) Decision
     }
 
-    class SessionService {
-      +authorizeBootstrap(secret) boolean
-      +createSession(authority) Promise~Cookie~
-      +hasSession(request, authority) boolean
+    class PairingService {
+      +requestAuthorization(secret, metadata) Promise~PairingState~
+      +resolvePairing(pairingBearer) Promise~PairingState~
     }
 
-    class SessionRepository {
-      +open() Promise~void~
-      +get(sessionKey) SessionRecord?
-      +put(sessionKey, record) Promise~void~
-      +delete(sessionKey) Promise~void~
-      +close() Promise~void~
+    class DeviceSessionService {
+      +validate(sessionBearer, authority) Promise~SessionDecision~
+      +issueApprovedSession(pending) Promise~Cookie~
+      +renewIfDue(session) Promise~Renewal?~
     }
 
-    class SessionRecord {
-      +authority string
-      +expiresAt number
+    class AuthorizationRepository {
+      +listPending() PendingDeviceRecord[]
+      +listDevices() AuthorizedDeviceRecord[]
+      +putPending(...)
+      +approvePending(...)
+      +deletePending(...)
+      +getDevice(...)
+      +putDevice(...)
+      +revokeDevice(...)
+      +close()
     }
 
-    class StorageDomain {
-      +open(spec) Promise~Domain~
+    class DeviceManagementService {
+      +list() ManagementSnapshot
+      +approve(requestId)
+      +reject(requestId)
+      +revoke(deviceId)
     }
 
-    class ProxyTransport {
-      +proxyHttp(...)
-      +proxyUpgrade(...)
-    }
+    class DeviceSettingsCard
+    class StorageDomain
+    class ProxyTransport
 
-    TokenGatePlugin --> Gateway
-    TokenGatePlugin --> SessionRepository
     Gateway --> AccessGate
-    AccessGate --> SessionService
-    SessionService --> SessionRepository
-    SessionRepository --> SessionRecord
-    SessionRepository --> StorageDomain
+    AccessGate --> PairingService
+    AccessGate --> DeviceSessionService
+    PairingService --> AuthorizationRepository
+    DeviceSessionService --> AuthorizationRepository
+    DeviceManagementService --> AuthorizationRepository
+    DeviceSettingsCard --> DeviceManagementService
+    AuthorizationRepository --> StorageDomain
     Gateway --> ProxyTransport
 ```
 
-## UML sequence — first bootstrap
+## UML sequence — token to host-approved device
 
 ```mermaid
 sequenceDiagram
-    actor B as Browser
+    actor R as Remote Browser
+    actor H as Host Operator
     participant G as Gateway
-    participant A as AccessGate
-    participant S as SessionService
-    participant R as SessionRepository
+    participant P as PairingService
+    participant Repo as AuthorizationRepository
+    participant UI as DSH Settings Card
+    participant S as DeviceSessionService
 
-    B->>G: GET /?token=<secret>
-    G->>A: classify request
-    A-->>G: bootstrap
-    G->>S: authorizeBootstrap(secret)
-    alt invalid
-        S-->>G: denied
-        G-->>B: opaque 404
-    else valid
-        S->>S: generate opaque session bearer
-        S->>R: put(digest(bearer), authority + expiresAt)
-        R-->>S: durable write complete
-        S-->>G: session cookie
-        G-->>B: 303 + HttpOnly cookie + clean Location
+    R->>G: GET /?token=<secret>
+    G->>P: requestAuthorization(secret, metadata)
+    P->>Repo: persist pending request
+    Repo-->>P: durable
+    G-->>R: clean URL + temporary pairing state
+
+    H->>UI: open device management
+    UI->>Repo: list pending via host management service
+    Repo-->>UI: pending device
+    H->>UI: approve
+    UI->>Repo: mark approved
+
+    R->>G: pairing poll/request
+    G->>P: resolve approved pairing
+    P->>S: issueApprovedSession(...)
+    S->>Repo: persist authorized device; consume pending
+    Repo-->>S: durable
+    G-->>R: session cookie + 303 to DSH
+```
+
+## UML sequence — authorized request with coalesced renewal
+
+```mermaid
+sequenceDiagram
+    actor R as Remote Browser
+    participant G as Gateway
+    participant S as DeviceSessionService
+    participant Repo as AuthorizationRepository
+    participant P as ProxyTransport
+    participant D as DSH Web
+
+    R->>G: request + session cookie
+    G->>S: validate(cookie, authority)
+    S->>Repo: get device record
+    Repo-->>S: valid record
+    alt renewal due
+        S->>Repo: update expiresAt + lastSeenAt + renewAfter
+        Repo-->>S: durable
+        S-->>G: allow + refresh cookie
+    else renewal not due
+        S-->>G: allow
     end
-```
-
-## UML sequence — authorized request after restart
-
-```mermaid
-sequenceDiagram
-    actor B as Browser
-    participant G as New Gateway Process
-    participant S as SessionService
-    participant R as Reopened SessionRepository
-    participant P as ProxyTransport
-    participant D as DSH Web
-
-    Note over G,R: plugin/process was restarted; persistent domain has been reopened
-    B->>G: request + existing cookie
-    G->>S: validate session(cookie, authority)
-    S->>R: get(digest(cookie))
-    R-->>S: authority + expiresAt
-    S-->>G: valid
     G->>P: proxy authorized request
-    P->>D: sanitized request
-    D-->>P: HTTP/WS response
-    P-->>B: transparent response
+    P->>D: sanitized HTTP/WS
+    D-->>P: response
+    P-->>R: response (+ refreshed cookie when due)
 ```
 
-## UML sequence — WebSocket and disposal
+## UML sequence — host revocation
 
 ```mermaid
 sequenceDiagram
-    actor B as Browser
+    actor H as Host Operator
+    actor R as Remote Browser
+    participant UI as DSH Settings Card
+    participant M as DeviceManagementService
+    participant Repo as AuthorizationRepository
     participant G as Gateway
-    participant P as ProxyTransport
-    participant D as DSH Web
-    participant R as SessionRepository
-    participant C as Cordis
 
-    B->>G: authorized Upgrade request
-    G->>P: proxyUpgrade(...)
-    P->>D: sanitized Upgrade request
-    D-->>P: 101 or ordinary HTTP rejection
-    P-->>B: relay accepted/rejected result
+    H->>UI: revoke device
+    UI->>M: revoke(deviceId)
+    M->>Repo: invalidate/delete device record
+    Repo-->>M: durable
 
-    C->>G: dispose plugin
-    G->>G: close listener + tracked client sockets
-    C->>R: close opened token-gate domain
-    R-->>C: runtime handle closed; durable records retained
+    R->>G: next request with old cookie
+    G->>Repo: resolve session digest
+    Repo-->>G: missing/revoked
+    G-->>R: denied
 ```
 
 ## UML authorization state
@@ -307,28 +378,35 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Parsed
-    Parsed --> Bootstrap: root request has bootstrap token
-    Parsed --> SessionCheck: ordinary request
-    Parsed --> Denied: malformed / invalid browser boundary
+    Parsed --> Pairing: valid root bootstrap token
+    Parsed --> SessionCheck: session cookie
+    Parsed --> Denied: neither / invalid boundary
 
-    Bootstrap --> Denied: secret invalid
-    Bootstrap --> Persisting: secret valid
-    Persisting --> SessionIssued: durable session write succeeds
-    Persisting --> Denied: persistence fails
-    SessionIssued --> [*]: 303 + cookie
+    Pairing --> Pending: pending request durably created
+    Pending --> Pending: host has not decided
+    Pending --> Approved: host approves
+    Pending --> Denied: host rejects / request expires
+    Approved --> SessionIssued: durable device session created
+    SessionIssued --> SessionCheck
 
-    SessionCheck --> Allowed: persisted session exists + not expired + authority matches
-    SessionCheck --> Denied: missing / expired / authority mismatch
+    SessionCheck --> Allowed: device exists + authority matches + not expired
+    SessionCheck --> Renewing: valid + renewal due
+    Renewing --> Allowed: durable renewal succeeds
+    Renewing --> Allowed: renewal fails but old deadline still valid
+    SessionCheck --> Denied: missing / revoked / expired / authority mismatch
 
     Allowed --> [*]: proxy HTTP/WS
-    Denied --> [*]: opaque denial
+    Denied --> [*]: opaque denial or pairing rejection
 ```
 
 ## Current implementation delta
 
-The code merged through PR #3 predates this Requirement/Architecture correction. Two known mismatches are intentionally visible rather than normalized into the design:
+The code merged through PR #3 predates this Requirement/Architecture correction. Known mismatches are intentionally visible rather than normalized into the design:
 
-- session records are currently process-local instead of using `ctx.storageDomain`, so restart persistence required by R-003 is not yet implemented;
-- the current code still contains IP allowlist/client-IP machinery, but IP allowlist authentication is not part of the current Requirement and should not shape core Spec or verification.
+- session records are process-local instead of using `ctx.storageDomain`;
+- bootstrap currently issues a session immediately instead of creating a host-approved pending device request;
+- there is no DSH Web device-management client surface yet;
+- session expiry is fixed rather than sliding/coalesced by activity;
+- current code still contains IP allowlist/client-IP machinery that is outside the current Requirement.
 
-These are implementation gaps to be corrected downstream. They are not reasons to weaken Requirement or Architecture to match existing code.
+These are downstream implementation gaps, not reasons to weaken Requirement or Architecture.
