@@ -1,141 +1,183 @@
 # Architecture
 
-This document visualizes the implemented architecture described by [`system.md`](./system.md). Diagrams intentionally model the current small plugin rather than a future identity platform.
+Status: **structural authority derived from `requirement.md`**
+
+This document defines the intended structure used to satisfy the product Requirement. It is not a diagram of every detail currently present in `src/`.
+
+## Design principles
+
+1. **DSH stays private.** DSH Web remains on loopback; token-gate is the browser-facing boundary.
+2. **Proxy, do not invade DSH internals.** Authorized traffic uses DSH's existing HTTP/WebSocket surface instead of modifying agent/session/UI internals.
+3. **Persist authorization through the host storage seam.** Browser sessions must survive token-gate/DSH process recreation until expiry.
+4. **Use DSH/Cordis services before inventing parallel infrastructure.** Lifecycle comes from Cordis, upstream discovery from `webServer`, and durable state from DSH `storageDomain`.
+5. **Keep the product smaller than a general auth platform.** Network allowlists, user accounts, and provider-specific proxy logic are outside the current architecture.
 
 ## C4 Level 1 — System context
 
 ```mermaid
 flowchart LR
-    U["Person: DSH user\nUses a browser to access DSH"]
-    OP["External system: deployment proxy\nOptional Caddy / cloudflared\nTLS termination and normalized forwarded headers"]
-    TG["Software system: dsh-token-gate\nBootstrap token, session boundary, IP allowlist, HTTP/WS proxy"]
-    DSH["External software system: DeepSeek Harness Web\nLoopback-only application server"]
-    ENV["External configuration\nCordis config + DSH_AUTH_TOKEN"]
+    U["Person: DSH user\nUses DSH through a browser"]
+    RP["Optional deployment proxy\nTLS termination / local forwarding"]
+    TG["Software system: dsh-token-gate\nBootstrap secret -> durable browser session\nHTTP/WebSocket access gate"]
+    DSH["External software system: DSH Web\nLoopback-only application server"]
+    STORE["DSH durable storage capability\nHost-managed local persistence"]
 
-    U -->|HTTPS/HTTP + WebSocket| OP
+    U -->|HTTPS/HTTP + WebSocket| RP
     U -. local development .->|HTTP + WebSocket| TG
-    OP -->|HTTP/WS to configured gateway port| TG
-    ENV -->|startup configuration / secret| TG
-    TG -->|sanitized HTTP/WS| DSH
+    RP -->|HTTP/WS| TG
+    TG -->|authorized, sanitized HTTP/WS| DSH
+    TG -->|session records| STORE
 ```
 
-The trust boundary is the gateway listener. The deployment proxy is optional and is not automatically trusted: its address must be present in `trustedProxies` before forwarded identity/protocol headers affect decisions.
+The optional deployment proxy is infrastructure, not part of the authentication model. Token-gate owns the authorization decision regardless of whether the browser reaches it directly or through a local reverse proxy.
 
-## C4 Level 2 — Containers / runtime boundary
+## C4 Level 2 — Runtime containers
 
 ```mermaid
 flowchart LR
-    subgraph EXT[Outside the DSH process]
-        B["Browser/client"]
-        RP["Optional reverse proxy"]
-    end
+    B["Browser"]
+    RP["Optional Caddy / cloudflared"]
 
     subgraph PROC[DSH process / Cordis application]
-        C["Cordis runtime\nloads plugin and owns effect lifecycle"]
-        P["dsh-token-gate plugin\nconfig + composition root"]
-        G["Gateway HTTP server\n127.0.0.1:3081 by default"]
-        W["DSH webServer service\n127.0.0.1:<port>"]
+        C["Cordis runtime\nplugin lifecycle"]
+        TG["token-gate plugin\ncomposition root"]
+        G["Gateway HTTP server\nseparate listener"]
+        W["DSH webServer\n127.0.0.1:<port>"]
+        SD["ctx.storageDomain\ntyped durable state facility"]
 
-        C -->|injects webServer + effect lifecycle| P
-        P -->|creates/listens/disposes| G
-        P -->|resolves loopback target from| W
+        C -->|effect lifecycle| TG
+        TG -->|create / listen / dispose| G
+        TG -->|resolve upstream| W
+        TG -->|open token-gate session domain| SD
         G -->|HTTP / WebSocket proxy| W
     end
 
-    B -->|direct local access| G
+    MEDIUM[("Host-selected local storage backend\nWeb profile currently routes storageDomain to JSON")]
+
     B --> RP
-    RP -->|remote deployment access| G
+    B -. direct local .-> G
+    RP --> G
+    SD -->|durable writes / reload on next process| MEDIUM
 ```
 
-`dsh-token-gate` and DSH run in the same Node/Cordis process, but the gateway uses a separate Node HTTP listener and proxies over loopback to the DSH Web listener. No external session store exists.
+Token-gate does **not** own a standalone database process. It consumes the DSH storage-domain capability and therefore follows the storage backend selected by the host profile. The Web profile already provides storage and a local backend; another profile may route the same domain differently.
 
-## Component view
+## Main component boundaries
 
 ```mermaid
 flowchart LR
-    IDX["index.ts\nCordis composition root"]
-    CFG["config.ts\nSchema + token resolution"]
-    UP["upstream.ts\nDSH loopback invariant"]
-    GW["gateway.ts\nHTTP listener + lifecycle"]
-    AC["access.ts\nrequest authority / browser fence / allowlist"]
-    AU["auth.ts\nsession + token comparison + rate state"]
-    NET["net.ts\nIP normalization / CIDR sets"]
-    PX["proxy.ts\nHTTP + WebSocket forwarding"]
+    IDX["Plugin composition\nCordis apply / dependency wiring"]
+    CFG["Configuration\nbootstrap secret, cookie/session lifetime, listener"]
+    GW["Gateway transport\nNode HTTP listener + connection lifecycle"]
+    ACCESS["Access gate\nbootstrap vs session vs deny"]
+    AUTH["Session service\nsecret verification + session semantics"]
+    REPO["Session repository\ndurable session records"]
+    PROXY["Proxy transport\nHTTP + WebSocket forwarding"]
     DSH["Injected DSH webServer"]
+    STORAGE["Injected storageDomain"]
 
     IDX --> CFG
-    IDX --> UP
     IDX --> GW
-    UP --> DSH
-    GW --> AC
-    GW --> AU
-    GW --> PX
-    AC --> AU
-    AC --> NET
-    PX --> AU
-    PX --> DSH
+    IDX --> REPO
+    GW --> ACCESS
+    ACCESS --> AUTH
+    AUTH --> REPO
+    GW --> PROXY
+    PROXY --> DSH
+    REPO --> STORAGE
 ```
 
-The dependency direction keeps policy/state separate from transport forwarding. `gateway.ts` composes decisions but does not own IP parsing or token/session internals.
+### Ownership
+
+- **Composition** owns Cordis integration and service acquisition.
+- **Gateway transport** owns the public listener and accepted client sockets.
+- **Access gate** decides only `bootstrap`, `allow`, or `deny` from request metadata and session state.
+- **Session service** owns bootstrap verification, cookie/session semantics, expiry, and authority binding.
+- **Session repository** owns durable storage of session records through `ctx.storageDomain`.
+- **Proxy transport** owns protocol forwarding and HTTP/WebSocket sanitization; it does not decide authentication.
+
+No IP allowlist component belongs to the current core design.
+
+## Persistent session design
+
+### Storage seam
+
+Token-gate opens one dedicated DSH storage domain through `ctx.storageDomain` during plugin activation.
+
+The domain contains a `sessions` table. Conceptually:
+
+```text
+SessionRecord {
+  authority: string
+  expiresAt: number
+}
+```
+
+The session cookie carries an opaque random bearer value. The durable table key should be a stable one-way digest derived from that bearer value so the raw cookie credential does not need to be stored as durable data.
+
+### Durability rule
+
+A successful bootstrap must persist the new session record **before** returning the `303` response and cookie. Once the browser receives a successful bootstrap response, immediate process restart must not invalidate that newly issued session.
+
+### Read path
+
+The storage-domain facility loads durable records when the domain opens and serves reads from its authoritative in-memory view. Normal request authorization therefore does not require opening a database/file per HTTP request.
+
+For each request:
+
+1. read the cookie bearer value;
+2. derive the repository key;
+3. resolve the persisted session record;
+4. reject absent or expired records;
+5. require the recorded external authority to match the current request authority.
+
+Expired-record cleanup may be lazy. Expiry enforcement is part of the authorization contract; the exact cleanup schedule is not.
+
+### Lifecycle
+
+The token-gate consumer owns its opened domain handle and closes it during Cordis disposal. Closing the domain releases runtime resources but **does not delete persisted session records**. On the next plugin/process instance, reopening the same domain restores still-valid sessions.
+
+The persistence backend and its physical location remain host concerns rather than token-gate configuration.
 
 ## Data-flow diagram
 
 ```mermaid
 flowchart LR
-    B["External entity\nBrowser / client"]
-    RP["External entity\nTrusted or untrusted deployment proxy"]
-    P1["Process 1\nParse request + determine authority/client IP"]
-    P2["Process 2\nAccess decision"]
-    P3["Process 3\nBootstrap authorization / session creation"]
-    P4["Process 4\nSanitize + proxy HTTP/WS"]
-    D1[("Data store\nIn-memory sessions")]
-    D2[("Data store\nIn-memory rate buckets")]
-    C1["Configuration / token source"]
+    B["External entity\nBrowser"]
+    RP["External entity\nOptional deployment proxy"]
+    PARSE["1. Parse external authority / trusted scheme"]
+    ACCESS["2. Access decision"]
+    BOOT["3. Bootstrap verification"]
+    SESS["4. Session lookup / creation"]
+    PX["5. Sanitize + proxy HTTP/WS"]
+    DS[("Durable token-gate session domain")]
     DSH["External entity\nDSH Web on loopback"]
 
     B --> RP
-    B -. direct local .-> P1
-    RP --> P1
-    C1 --> P1
-    C1 --> P3
-    P1 -->|authority, client IP, browser metadata| P2
-    P2 -->|bootstrap candidate| P3
-    P3 <--> D2
-    P3 -->|new session| D1
-    D1 -->|session lookup| P2
-    P2 -->|allow| P4
-    P2 -->|deny| B
-    P3 -->|303 + session cookie| B
-    P4 -->|sanitized request| DSH
-    DSH -->|HTTP/upgrade response| P4
-    P4 -->|sanitized/streamed response| B
+    B -. local .-> PARSE
+    RP --> PARSE
+    PARSE --> ACCESS
+    ACCESS -->|root bootstrap| BOOT
+    BOOT -->|valid secret| SESS
+    SESS -->|durable put before success| DS
+    DS -->|lookup persisted session| SESS
+    SESS -->|valid authority + expiry| ACCESS
+    ACCESS -->|allow| PX
+    ACCESS -->|deny| B
+    SESS -->|303 + HttpOnly cookie| B
+    PX -->|sanitized HTTP/WS| DSH
+    DSH -->|response / upgrade| PX
+    PX -->|transparent response / stream| B
 ```
 
 ### Sensitive-data flow
 
-The bootstrap token is accepted only on the root bootstrap request and is used only for comparison. It is never forwarded to DSH as gateway authentication data. The gateway session cookie is consumed at the access boundary and stripped before upstream forwarding. Session IDs and rate buckets exist only in process memory.
+The bootstrap secret is used only to authorize bootstrap and must not be proxied to DSH. The session cookie is consumed by token-gate and removed before forwarding. Persisted session state contains the authorization metadata required to validate a cookie across restarts; the raw session bearer need not be persisted.
 
 ## UML class/dependency view
 
 ```mermaid
 classDiagram
-    class Config {
-      +token? string
-      +cookieName string
-      +sessionTtlDays number
-      +sessionMax number
-      +rateMax number
-      +rateWindowMinutes number
-      +rateMaxKeys number
-      +allowIps string[]
-      +trustedProxies string[]
-      +trustedHosts string[]
-      +realIpHeader RealIpHeader
-      +allowGeneratedToken boolean
-      +bind string
-      +port number
-    }
-
     class TokenGatePlugin {
       +apply(ctx, config) Promise~void~
     }
@@ -146,49 +188,46 @@ classDiagram
       +close() Promise~void~
     }
 
-    class AccessPolicy {
-      +decide(req) AccessDecision
-      +bootstrapToken(req) string?
-      +clientIp(req) string
-      +requestAuthority(req) string?
-      +isSecure(req) boolean
+    class AccessGate {
+      +decide(request) Decision
     }
 
-    class AuthService {
-      +hasRequestSession(req, authority) boolean
-      +authorizeBootstrap(clientKey, submitted) boolean
-      +createSession(authority) string?
-      +sessionCookie(id, secure) string
-      +stripSessionCookie(raw) string?
-      +isSessionSetCookie(raw) boolean
+    class SessionService {
+      +authorizeBootstrap(secret) boolean
+      +createSession(authority) Promise~Cookie~
+      +hasSession(request, authority) boolean
     }
 
-    class IpSet {
-      +has(address) boolean
+    class SessionRepository {
+      +open() Promise~void~
+      +get(sessionKey) SessionRecord?
+      +put(sessionKey, record) Promise~void~
+      +delete(sessionKey) Promise~void~
+      +close() Promise~void~
     }
 
-    class Proxy {
-      +proxyHttp(req, res, target, auth, logger)
-      +proxyUpgrade(req, socket, head, target, auth, logger)
-      +forwardHeaders(...)
-      +sanitizeResponseHeaders(...)
+    class SessionRecord {
+      +authority string
+      +expiresAt number
     }
 
-    class UpstreamTarget {
-      +host string
-      +port number
+    class StorageDomain {
+      +open(spec) Promise~Domain~
     }
 
-    TokenGatePlugin --> Config
+    class ProxyTransport {
+      +proxyHttp(...)
+      +proxyUpgrade(...)
+    }
+
     TokenGatePlugin --> Gateway
-    TokenGatePlugin --> UpstreamTarget
-    Gateway --> AccessPolicy
-    Gateway --> AuthService
-    Gateway --> Proxy
-    AccessPolicy --> AuthService
-    AccessPolicy --> IpSet
-    Proxy --> AuthService
-    Proxy --> UpstreamTarget
+    TokenGatePlugin --> SessionRepository
+    Gateway --> AccessGate
+    AccessGate --> SessionService
+    SessionService --> SessionRepository
+    SessionRepository --> SessionRecord
+    SessionRepository --> StorageDomain
+    Gateway --> ProxyTransport
 ```
 
 ## UML sequence — first bootstrap
@@ -197,107 +236,99 @@ classDiagram
 sequenceDiagram
     actor B as Browser
     participant G as Gateway
-    participant A as AccessPolicy
-    participant S as AuthService
+    participant A as AccessGate
+    participant S as SessionService
+    participant R as SessionRepository
 
     B->>G: GET /?token=<secret>
-    G->>A: decide(request)
+    G->>A: classify request
     A-->>G: bootstrap
-    G->>A: bootstrapToken / authority / clientIp
-    G->>S: authorizeBootstrap(clientKey, token)
-    S->>S: rate-window check + timing-safe digest compare
-    alt invalid or rate denied
-        S-->>G: false
-        G-->>B: 404 page not found
-    else valid
-        S-->>G: true
-        G->>S: createSession(authority)
-        S-->>G: session id
-        G-->>B: 303 + Set-Cookie + clean Location
-    end
-```
-
-## UML sequence — authorized HTTP request
-
-```mermaid
-sequenceDiagram
-    actor B as Browser
-    participant G as Gateway
-    participant A as AccessPolicy
-    participant S as AuthService
-    participant P as Proxy
-    participant D as DSH Web
-
-    B->>G: HTTP request + session cookie
-    G->>A: decide(request)
-    A->>S: hasRequestSession(request, authority)
-    S-->>A: valid / invalid
-    alt denied
-        A-->>G: deny
+    G->>S: authorizeBootstrap(secret)
+    alt invalid
+        S-->>G: denied
         G-->>B: opaque 404
-    else allowed
-        A-->>G: allow
-        G->>P: proxyHttp(...)
-        P->>P: strip gateway/proxy/hop headers; rewrite Host/Origin
-        P->>D: sanitized streaming request
-        D-->>P: response stream
-        P->>P: sanitize headers / protect gateway cookie namespace
-        P-->>B: response stream
+    else valid
+        S->>S: generate opaque session bearer
+        S->>R: put(digest(bearer), authority + expiresAt)
+        R-->>S: durable write complete
+        S-->>G: session cookie
+        G-->>B: 303 + HttpOnly cookie + clean Location
     end
 ```
 
-## UML sequence — WebSocket upgrade and disposal
+## UML sequence — authorized request after restart
+
+```mermaid
+sequenceDiagram
+    actor B as Browser
+    participant G as New Gateway Process
+    participant S as SessionService
+    participant R as Reopened SessionRepository
+    participant P as ProxyTransport
+    participant D as DSH Web
+
+    Note over G,R: plugin/process was restarted; persistent domain has been reopened
+    B->>G: request + existing cookie
+    G->>S: validate session(cookie, authority)
+    S->>R: get(digest(cookie))
+    R-->>S: authority + expiresAt
+    S-->>G: valid
+    G->>P: proxy authorized request
+    P->>D: sanitized request
+    D-->>P: HTTP/WS response
+    P-->>B: transparent response
+```
+
+## UML sequence — WebSocket and disposal
 
 ```mermaid
 sequenceDiagram
     actor B as Browser
     participant G as Gateway
-    participant P as Proxy
+    participant P as ProxyTransport
     participant D as DSH Web
+    participant R as SessionRepository
     participant C as Cordis
 
-    B->>G: Upgrade request
-    G->>G: same access policy as HTTP
-    G->>P: proxyUpgrade(request, socket, head)
-    P->>D: canonicalized Upgrade request
-    alt DSH rejects
-        D-->>P: ordinary HTTP response
-        P-->>B: sanitized HTTP response
-    else DSH accepts
-        D-->>P: 101 + upstream socket
-        P-->>B: 101
-        P->>D: client early head bytes
-        B<<->>D: duplex stream through proxy
-    end
+    B->>G: authorized Upgrade request
+    G->>P: proxyUpgrade(...)
+    P->>D: sanitized Upgrade request
+    D-->>P: 101 or ordinary HTTP rejection
+    P-->>B: relay accepted/rejected result
 
-    C->>G: dispose effect
-    G->>G: destroy tracked client sockets
-    G->>G: close listener
-    G-->>C: resolve only after closures settle
+    C->>G: dispose plugin
+    G->>G: close listener + tracked client sockets
+    C->>R: close opened token-gate domain
+    R-->>C: runtime handle closed; durable records retained
 ```
 
-## UML state view — request authorization
+## UML authorization state
 
 ```mermaid
 stateDiagram-v2
     [*] --> Parsed
-    Parsed --> Denied: malformed URL / invalid authority / browser fence fails
-    Parsed --> Bootstrap: root token query
+    Parsed --> Bootstrap: root request has bootstrap token
     Parsed --> SessionCheck: ordinary request
+    Parsed --> Denied: malformed / invalid browser boundary
 
-    Bootstrap --> Denied: non-GET / token invalid / rate denied / capacity full
-    Bootstrap --> SessionIssued: token valid + session created
+    Bootstrap --> Denied: secret invalid
+    Bootstrap --> Persisting: secret valid
+    Persisting --> SessionIssued: durable session write succeeds
+    Persisting --> Denied: persistence fails
     SessionIssued --> [*]: 303 + cookie
 
-    SessionCheck --> Allowed: authority-bound session valid
-    SessionCheck --> AllowlistCheck: no valid session
-    AllowlistCheck --> Allowed: client IP allowed + Host fence passes
-    AllowlistCheck --> Denied: otherwise
+    SessionCheck --> Allowed: persisted session exists + not expired + authority matches
+    SessionCheck --> Denied: missing / expired / authority mismatch
 
     Allowed --> [*]: proxy HTTP/WS
-    Denied --> [*]: opaque 404 or close upgrade
+    Denied --> [*]: opaque denial
 ```
 
-## Lifecycle notes
+## Current implementation delta
 
-The only persistent configuration is external Cordis/process configuration. Sessions and rate-limit records are not durable. This is a current behavior, not an omitted storage component in the diagrams. Adding durable device/session trust would change both the C4/data-flow views and `TG-SESS-004`, so it requires a separate spec change.
+The code merged through PR #3 predates this Requirement/Architecture correction. Two known mismatches are intentionally visible rather than normalized into the design:
+
+- session records are currently process-local instead of using `ctx.storageDomain`, so restart persistence required by R-003 is not yet implemented;
+- the current code still contains IP allowlist/client-IP machinery, but IP allowlist authentication is not part of the current Requirement and should not shape core Spec or verification.
+
+These are implementation gaps to be corrected downstream. They are not reasons to weaken Requirement or Architecture to match existing code.
