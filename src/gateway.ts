@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { Socket } from 'node:net'
+import type { Duplex } from 'node:stream'
 import type { AuthorizationRepository } from './authorization.ts'
 import { createAuthService } from './auth.ts'
 import type { Config } from './config.ts'
@@ -53,7 +54,7 @@ function json(res: ServerResponse, status: number, body: unknown, headers: Recor
 }
 
 function waitPage(returnTo: string): string {
-  const target = JSON.stringify(returnTo)
+  const target = JSON.stringify(returnTo).replace(/</g, '\\u003c')
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Waiting for host approval</title></head><body><main><h1>Waiting for host approval</h1><p>This device has requested access to DSH.</p><p id="status">Approve it from the host's local Token Gate settings.</p></main><script>const target=${target};const status=document.getElementById('status');async function poll(){try{const r=await fetch('${PAIRING_STATUS_PATH}',{cache:'no-store'});if(r.status===200){const j=await r.json();if(j.state==='approved'){location.replace(target);return}}if(r.status===202){setTimeout(poll,1500);return}status.textContent='This authorization request was rejected or expired.'}catch{setTimeout(poll,2000)}}poll();</script></body></html>`
 }
 
@@ -195,7 +196,7 @@ export function createGateway(options: GatewayOptions): Gateway {
     proxyHttp(req, res, upstream, auth, logger, decision.refreshCookie)
   }
 
-  async function handleUpgrade(req: IncomingMessage, socket: Socket, head: Buffer): Promise<void> {
+  async function handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     const authority = access.requestAuthority(req)
     if (
       authority === undefined
