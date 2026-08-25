@@ -152,19 +152,25 @@ export async function openAuthorizationRepository(facility: StorageDomainFacilit
       return pending.put(id, item)
     },
 
-    async approvePending(id, now = Date.now()) {
-      const current = pending.get(id)
-      if (current === undefined || current.expiresAt <= now || current.issuedDeviceId !== undefined) return undefined
-      if (current.state === 'approved') return current
-      return await pending.update(id, item => ({ ...item, state: 'approved', approvedAt: now }))
+    approvePending(id, now = Date.now()) {
+      return serialize(async () => {
+        const current = pending.get(id)
+        if (current === undefined || current.expiresAt <= now || current.issuedDeviceId !== undefined) return undefined
+        if (current.state === 'approved') return current
+        return await pending.update(id, item => ({ ...item, state: 'approved', approvedAt: now }))
+      })
     },
 
     rejectPending(id) {
-      return pending.delete(id)
+      return serialize(async () => {
+        const current = pending.get(id)
+        if (current === undefined || current.issuedDeviceId !== undefined) return false
+        return await pending.delete(id)
+      })
     },
 
     consumePending(id) {
-      return pending.delete(id)
+      return serialize(() => pending.delete(id))
     },
 
     getDevice(id) {
