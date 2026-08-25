@@ -23,6 +23,14 @@ This repository is a small authentication/reverse-proxy boundary in front of Dee
 - Cordis activation awaits gateway listen, and disposal does not resolve until the gateway listener and all tracked client sockets, including upgraded sockets, have closed.
 - Rate-limit identities and sessions have hard cardinality bounds.
 
+## Spec-driven changes
+
+- `spec/` is the lightweight behavioral contract. The initial baseline was reconstructed from the already-implemented code; future behavior changes should update the relevant requirement before or in the same PR as the implementation.
+- Reference stable requirement IDs such as `TG-AUTH-005` or `TG-WS-003` in behavior-changing PRs when useful.
+- Update architecture diagrams only when relationships, trust boundaries, state ownership, or data flows actually change. Do not use architecture diagrams as changelog decoration.
+- A requirement does not imply a dedicated test. Keep traceability lightweight and add tests only when they have independent regression value.
+- Real DSH/Cordis integration requirements should be validated against a real target profile when framework fixtures would merely simulate upstream internals.
+
 ## Testing discipline
 
 - Tests protect observable plugin behavior, non-trivial parsing/state rules, or a reproduced regression.
