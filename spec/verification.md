@@ -6,13 +6,14 @@ This document defines the evidence required for the projected contract in [`syst
 
 A test or manual acceptance check should protect at least one independently meaningful failure mode:
 
-- a user-observable access behavior;
-- durable session state across lifecycle transitions;
-- a non-trivial parser/state/protocol rule;
+- a user-observable pairing/device-access behavior;
+- durable authorization state across lifecycle transitions;
+- sliding-expiry/revocation state transitions;
+- a non-trivial parser/protocol rule;
 - a reproduced regression;
-- a DSH/Cordis lifecycle, storage, HTTP, or WebSocket contract actually depended on.
+- a DSH/Cordis lifecycle, storage, client-extension, HTTP, or WebSocket contract actually depended on.
 
-Do not add fake Cordis/storage implementations merely to claim framework coverage when the important contract can be checked against a real DSH profile.
+Do not add fake Cordis/storage/client-runtime implementations merely to claim framework coverage when the important integration can be checked against a real DSH Web profile.
 
 IP allowlist behavior is not part of the current Requirement and is not a release verification target.
 
@@ -22,19 +23,23 @@ The aligned implementation should keep the smallest regression set that independ
 
 | Surface | Required evidence |
 |---|---|
-| Bootstrap | valid root token creates a session, returns `303`, removes only the gateway token, and denied/application-path requests do not bootstrap |
-| Durable session creation | bootstrap success is returned only after the session record is durably written |
-| Restart persistence | a cookie issued by one plugin/session-repository instance is accepted by a newly opened instance using the same storage medium |
-| Expiry / authority | expired or wrong-authority persisted sessions do not authorize |
-| Cookie boundary | gateway cookie is not forwarded to DSH and DSH cannot overwrite the gateway cookie name |
-| HTTP proxy | authorized HTTP reaches DSH; upstream abort/error terminates the downstream correctly |
+| Pairing bootstrap | valid root token creates durable pending state, removes the secret from the visible flow, and does **not** authorize DSH before host approval |
+| Pairing rejection/expiry | rejected, expired, missing, or consumed pending state cannot create an authorized device |
+| Host approval | approval permits exactly one durable authorized-device session exchange |
+| Restart persistence | a cookie issued to an approved device is accepted by a newly opened repository instance using the same storage medium |
+| Sliding renewal | first valid request after the renewal threshold durably extends expiry and cookie lifetime; requests inside the interval do not perform repeated renewal writes |
+| Expiry / authority | expired or wrong-authority device records do not authorize |
+| Revocation | durable revoke/delete invalidates the old session on the next request; a new pairing flow can authorize the same browser again |
+| Device management | pending/authorized lists and approve/reject/revoke mutations reflect repository state |
+| Cookie boundary | gateway cookies are not forwarded to DSH and DSH cannot overwrite the gateway session cookie name |
+| HTTP proxy | authorized HTTP reaches DSH; upstream abort/error terminates downstream correctly |
 | WebSocket proxy | rejection, acceptance/early data, paired teardown, and gateway disposal preserve expected protocol behavior |
 | Upstream invariant | token-gate refuses a DSH Web upstream that is not loopback-only |
 | Token resolution | configured/environment/development fallback and missing-token failure behave as specified |
 
-The current pre-alignment test suite may contain extra tests for legacy IP allowlist/client-IP behavior. Those tests are not required by the current Spec and may be removed together with the corresponding implementation surface.
+Controlled time/storage fixtures are justified for sliding renewal and expiry because they protect non-trivial state transitions without requiring day-long tests.
 
-A persistent-session regression is mandatory because R-003 changes a user-observable lifecycle guarantee that the current code does not yet satisfy.
+The current pre-alignment suite may contain tests for legacy IP allowlist/client-IP behavior. Those tests are not required by the current Spec and may be removed with that implementation surface.
 
 ## 3. Repository validation
 
@@ -50,15 +55,15 @@ Acceptance:
 
 - typecheck succeeds;
 - behavior tests succeed;
-- build succeeds;
-- the publish tarball contains the expected built plugin/bundle artifacts;
+- Host and client bundles build when the device-management client surface is introduced;
+- the publish tarball contains the expected Host plugin, client bundle, bundle patch, and metadata;
 - package inspection does not re-run the full build/test lifecycle.
 
 Coverage may be inspected diagnostically but is not a release gate.
 
 ## 4. Real DSH Web-profile acceptance
 
-This validates the external DSH/Cordis contracts that should not be replaced by a simulated framework.
+This validates the DSH/Cordis contracts that should not be replaced by simulated framework internals.
 
 ### Preconditions
 
@@ -68,30 +73,24 @@ This validates the external DSH/Cordis contracts that should not be replaced by 
 - usable `web` profile;
 - known bootstrap secret;
 - DSH Web on loopback;
-- Web profile storage capability available.
+- Web profile storage/storage-domain capability available.
 
 ### A. Install and inspect composition
 
-Install the checkout or release candidate:
-
 ```sh
 dsh plugin --profile web add .
-```
-
-Inspect the composed tree:
-
-```sh
 dsh --profile web --dump-config
 ```
 
 Acceptance:
 
-- token-gate bundle is composed;
-- `webServer` remains loopback-only;
-- the storage/storage-domain capability required by token-gate is present;
-- token-gate listener configuration matches the intended deployment.
+- token-gate Host bundle is composed;
+- DSH Web remains loopback-only;
+- required storage/storage-domain capability is present;
+- token-gate listener configuration matches deployment intent;
+- when the client surface is implemented, the package exposes the expected DSH Web client contribution.
 
-### B. Start the Web profile
+### B. Start the Web profile and host panel
 
 ```sh
 dsh web --no-open
@@ -99,74 +98,119 @@ dsh web --no-open
 
 Acceptance:
 
-- DSH Web and token-gate both start without lifecycle/dependency errors;
-- token-gate opens its durable session domain;
-- the DSH listener remains distinct and loopback-only.
+- DSH Web and token-gate start without lifecycle/dependency errors;
+- token-gate opens its durable authorization domain;
+- the DSH listener remains distinct and loopback-only;
+- the host can open local DSH Web and see the token-gate device-management card in the intended settings/plugin surface;
+- the card shows current pending and authorized-device state.
 
-### C. Unauthorized surface
+### C. Unauthorized remote access
 
-Access the gateway without a valid session or bootstrap token.
+Access the token-gate listener from a browser without a valid device session or bootstrap token.
 
 Acceptance:
 
 - the request does not reach DSH;
-- HTTP denial uses the documented opaque surface;
-- an application path containing its own `token` query does not become a gateway bootstrap.
+- unrelated unauthorized HTTP uses the documented opaque denial surface;
+- an application path containing its own `token` query does not become a gateway pairing request.
 
-### D. First bootstrap
+### D. Start a pairing request
 
-Open the configured gateway root with the valid bootstrap token.
+Open the configured gateway root with the valid bootstrap token from a clean remote browser.
 
 Acceptance:
 
-- response is `303`;
-- redirected URL no longer contains the gateway token;
-- browser receives the HttpOnly session cookie;
-- trusted HTTPS ingress produces `Secure`; direct local HTTP does not;
-- the corresponding server-side session record has been durably committed before the successful response completes.
+- the bootstrap secret is removed from the visible URL/next request flow;
+- the browser receives only short-lived pairing state, not a DSH-authorizing device session;
+- a pending device request is durably visible in the host management card;
+- DSH remains inaccessible from that browser while the request is pending.
 
-### E. Normal DSH use
+### E. Reject a device
 
-After bootstrap:
+From the host management card, reject the pending request.
 
-- refresh and navigate DSH Web;
+Acceptance:
+
+- the remote browser cannot convert the rejected pairing state into a DSH session;
+- DSH remains inaccessible;
+- the rejected request disappears from the actionable pending list or is otherwise clearly non-actionable.
+
+### F. Approve a device
+
+Create a fresh pairing request and approve it from the host management card.
+
+Acceptance:
+
+- approval is durably recorded;
+- the remote browser's next pairing poll/request exchanges the approved request for an authorized device session;
+- the pending request cannot be exchanged twice;
+- the browser receives an HttpOnly session cookie and reaches the clean DSH route;
+- the device appears in the authorized-device list with distinguishing metadata and created/last-seen/expiry information.
+
+### G. Normal DSH use
+
+After approval:
+
+- refresh and navigate DSH Web through token-gate;
 - create/open a DSH conversation;
 - perform at least one interaction using the live WebSocket/event path.
 
 Acceptance:
 
-- no repeated bootstrap is required;
+- no repeated pairing is required;
 - ordinary HTTP and streaming responses work;
 - WebSocket/event traffic remains usable;
 - DSH application cookies remain usable;
-- the token-gate cookie is not forwarded upstream.
+- token-gate credential cookies are not forwarded upstream.
 
-### F. Restart persistence
+### H. Restart persistence
 
-With the browser retaining its session cookie:
+With the approved browser retaining its session cookie:
 
 1. stop DSH/token-gate cleanly;
 2. start the same Web profile again;
-3. revisit the gateway without a bootstrap token.
+3. revisit token-gate without a bootstrap token.
 
 Acceptance:
 
 - the existing cookie still authorizes access;
-- the reopened token-gate session domain resolves the persisted record;
-- a process/plugin restart alone does not force re-bootstrap.
+- the reopened authorization domain resolves the durable device record;
+- process/plugin restart alone does not force host approval again.
 
-This is a release-critical acceptance check for R-003.
+### I. Sliding renewal
 
-### G. Expiry
-
-Expiry should be verified through an automated controlled-lifetime/clock/storage fixture rather than waiting for the normal browser TTL in a manual release check.
+Use a controlled automated clock/storage test for exact timing, then confirm the observable behavior in a short real-profile check where practical.
 
 Acceptance:
 
-- once the server-side expiry is reached, the persisted record no longer authorizes even if a cookie value is still presented;
-- cleanup timing may be lazy as long as authorization is denied.
+- valid requests before the renewal threshold do not repeatedly write a new durable expiry;
+- the first successful request after the threshold extends the durable expiry by the configured inactivity lifetime;
+- the browser cookie lifetime is refreshed only after that durable renewal succeeds;
+- `lastSeenAt`/renewal metadata shown to the host advances consistently with the coalesced refresh;
+- if renewal persistence fails while the old deadline is still valid, the gateway does not claim a longer expiry than durable state proves.
 
-### H. Lifecycle / shutdown
+### J. Host revocation and re-authorization
+
+From the host card, revoke the authorized device.
+
+Acceptance:
+
+- the old session cookie stops authorizing on the next request without restarting DSH;
+- the device is no longer shown as authorized;
+- presenting the bootstrap secret again creates a new pending request rather than restoring access immediately;
+- a new host approval creates a fresh usable session.
+
+### K. Expiry
+
+Verify expiry with a controlled lifetime/clock fixture rather than waiting for normal TTL.
+
+Acceptance:
+
+- once durable expiry is reached, the device no longer authorizes even if a cookie value is still presented;
+- a new token + host approval flow is required to regain access;
+- cleanup timing may remain lazy as long as authorization is denied.
+
+### L. Lifecycle / shutdown
 
 With an active WebSocket/event connection, stop DSH normally.
 
@@ -174,22 +218,22 @@ Acceptance:
 
 - token-gate stops accepting traffic;
 - active client sockets close;
-- the opened storage-domain handle closes cleanly;
+- the authorization-domain handle closes cleanly;
 - shutdown does not hang on leaked gateway resources;
-- valid persisted session records are not deleted by disposal.
+- valid pending/device records are not deleted merely by disposal.
 
-### I. Optional deployment proxy
+### M. Optional deployment proxy
 
-When a real Caddy/cloudflared deployment is part of the release target, additionally verify trusted HTTPS metadata and remote bootstrap through that path.
+When Caddy/cloudflared or another reverse proxy is part of the release target, additionally verify trusted HTTPS metadata, pairing, session renewal, HTTP, and WebSocket behavior through that path.
 
-Client-IP allowlist behavior is intentionally excluded from this acceptance suite.
+Client-IP allowlist behavior remains intentionally excluded.
 
 ## 5. Release decision
 
 A release candidate is ready when:
 
 - repository validation passes on Windows + Node 22;
-- the real DSH Web-profile path passes;
-- restart persistence passes;
-- any Spec/implementation mismatch is resolved explicitly rather than documented as accidental current behavior;
+- the real DSH Web-profile host panel + remote pairing path passes;
+- approval, restart persistence, sliding renewal, revocation, and re-authorization pass;
+- any Spec/implementation mismatch is resolved explicitly;
 - the published package version matches the artifact actually tested.
