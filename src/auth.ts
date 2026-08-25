@@ -1,11 +1,6 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Config } from './config.ts'
-
-interface Session {
-  expiresAt: number
-  authority: string
-}
 
 interface RateBucket {
   windowStart: number
@@ -13,12 +8,17 @@ interface RateBucket {
 }
 
 export interface AuthService {
-  hasRequestSession(req: IncomingMessage, authority: string): boolean
   authorizeBootstrap(clientKey: string, submitted: string): boolean
-  createSession(authority: string): string | undefined
-  sessionCookie(id: string, secure: boolean): string
-  stripSessionCookie(raw: string): string | undefined
-  isSessionSetCookie(raw: string): boolean
+  newPairingBearer(): string
+  sessionBearerForPairing(pairingBearer: string): string
+  digestBearer(value: string): string
+  readSessionCookie(req: IncomingMessage): string | undefined
+  readPairingCookie(req: IncomingMessage): string | undefined
+  sessionCookie(value: string, secure: boolean, maxAgeSeconds: number): string
+  pairingCookie(value: string, secure: boolean, maxAgeSeconds: number): string
+  clearPairingCookie(secure: boolean): string
+  stripGatewayCookies(raw: string): string | undefined
+  isGatewaySetCookie(raw: string): boolean
 }
 
 function tokenDigest(value: string): Buffer {
@@ -42,32 +42,18 @@ function assertCookieName(name: string): void {
   }
 }
 
+function cookie(name: string, value: string, secure: boolean, maxAgeSeconds: number): string {
+  const base = `${name}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`
+  return secure ? `${base}; Secure` : base
+}
+
 export function createAuthService(config: Config, token: string): AuthService {
   assertCookieName(config.cookieName)
-  const ttlMs = config.sessionTtlDays * 24 * 60 * 60 * 1000
+  assertCookieName(config.pairingCookieName)
   const rateWindowMs = config.rateWindowMinutes * 60 * 1000
   const expectedDigest = tokenDigest(token)
-  const sessions = new Map<string, Session>()
   const attempts = new Map<string, RateBucket>()
   let lastRateSweep = Date.now()
-
-  function pruneSessions(): void {
-    const now = Date.now()
-    for (const [id, session] of sessions) {
-      if (now > session.expiresAt) sessions.delete(id)
-    }
-  }
-
-  function getSession(id: string | undefined): Session | undefined {
-    if (id === undefined || id.length === 0) return undefined
-    const session = sessions.get(id)
-    if (session === undefined) return undefined
-    if (Date.now() > session.expiresAt) {
-      sessions.delete(id)
-      return undefined
-    }
-    return session
-  }
 
   function sweepRateBuckets(now: number): void {
     if (now - lastRateSweep < rateWindowMs) return
@@ -95,43 +81,58 @@ export function createAuthService(config: Config, token: string): AuthService {
     return true
   }
 
-  return {
-    hasRequestSession(req, authority) {
-      const session = getSession(readCookie(req, config.cookieName))
-      return session !== undefined && session.authority === authority
-    },
+  const gatewayCookies = new Set([config.cookieName, config.pairingCookieName])
 
+  return {
     authorizeBootstrap(clientKey, submitted) {
       if (!allowAttempt(clientKey)) return false
       return timingSafeEqual(tokenDigest(submitted), expectedDigest)
     },
 
-    createSession(authority) {
-      pruneSessions()
-      if (sessions.size >= config.sessionMax) return undefined
-      const now = Date.now()
-      const id = randomUUID()
-      sessions.set(id, { expiresAt: now + ttlMs, authority })
-      return id
+    newPairingBearer() {
+      return randomBytes(32).toString('base64url')
     },
 
-    sessionCookie(id, secure) {
-      const base = `${config.cookieName}=${id}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(ttlMs / 1000)}`
-      return secure ? `${base}; Secure` : base
+    sessionBearerForPairing(pairingBearer) {
+      return createHmac('sha256', token).update(`session:${pairingBearer}`, 'utf8').digest('base64url')
     },
 
-    stripSessionCookie(raw) {
+    digestBearer(value) {
+      return createHash('sha256').update(value, 'utf8').digest('hex')
+    },
+
+    readSessionCookie(req) {
+      return readCookie(req, config.cookieName)
+    },
+
+    readPairingCookie(req) {
+      return readCookie(req, config.pairingCookieName)
+    },
+
+    sessionCookie(value, secure, maxAgeSeconds) {
+      return cookie(config.cookieName, value, secure, maxAgeSeconds)
+    },
+
+    pairingCookie(value, secure, maxAgeSeconds) {
+      return cookie(config.pairingCookieName, value, secure, maxAgeSeconds)
+    },
+
+    clearPairingCookie(secure) {
+      return cookie(config.pairingCookieName, '', secure, 0)
+    },
+
+    stripGatewayCookies(raw) {
       const kept = raw.split(';').map(part => part.trim()).filter((part) => {
         const eq = part.indexOf('=')
         if (eq === -1) return part.length > 0
-        return part.slice(0, eq).trim() !== config.cookieName
+        return !gatewayCookies.has(part.slice(0, eq).trim())
       })
       return kept.length > 0 ? kept.join('; ') : undefined
     },
 
-    isSessionSetCookie(raw) {
+    isGatewaySetCookie(raw) {
       const eq = raw.indexOf('=')
-      return eq !== -1 && raw.slice(0, eq).trim() === config.cookieName
+      return eq !== -1 && gatewayCookies.has(raw.slice(0, eq).trim())
     },
   }
 }
