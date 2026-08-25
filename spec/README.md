@@ -1,53 +1,73 @@
-# Specification
+# Specification Workflow
 
-This directory is the lightweight specification baseline for `dsh-token-gate`.
+This repository uses a deliberately small Spec Driven Development workflow:
 
-The code existed before this specification. This first spec pass therefore records the behavior already implemented on `main`; it does not invent a replacement architecture. After this baseline is merged, behavior-changing work should update the relevant spec first or in the same pull request, then update implementation and tests against that spec.
+**Requirement → Architecture/Design → Spec → Task**
 
-## Documents
+The first documentation pass was created after the implementation already existed. That made it easy to accidentally promote current code choices into product requirements. The corrected baseline treats implementation as evidence only and restores authority to the upstream artifacts.
 
-- [`system.md`](./system.md) — product boundary, requirements, invariants, configuration semantics, and non-goals.
-- [`architecture.md`](./architecture.md) — C4 views, data-flow view, and UML views of the implemented design.
-- [`verification.md`](./verification.md) — automated regression scope and release-candidate validation against a real DSH Web profile.
+## Authority
 
-## Working model
+### [`requirement.md`](./requirement.md) — intent authority
 
-The repository uses a deliberately small form of spec-driven development:
+Defines:
 
-1. **State the observable contract.** Describe the behavior or boundary that should change.
-2. **Identify affected requirements.** Add or revise requirement IDs in `system.md` rather than creating a large design process around every patch.
-3. **Update architecture only when architecture changes.** Diagrams describe stable relationships and flows; they are not changelog illustrations.
-4. **Implement the smallest code change that satisfies the contract.** Existing Cordis and DSH services remain the preferred integration points.
-5. **Test according to impact.** Add a regression only when it protects observable behavior, a non-trivial parser/state transition, a reproduced bug, or a DSH/Cordis contract actually depended on.
-6. **Validate in the target environment when unit fixtures are insufficient.** Framework simulation is not a substitute for a real DSH Web-profile check.
+- the project goal;
+- user-observable outcomes;
+- product/environment constraints;
+- current non-goals and future directions.
 
-Coverage percentages, test counts, CI job counts, and platform matrices are not specification requirements.
+Implementation does not redefine Requirement merely because it already behaves differently.
 
-## Sources of truth
+### [`architecture.md`](./architecture.md) — structural authority
 
-For the baseline represented here:
+Defines how the Requirement is organized:
 
-- `src/` is the implementation fact used to reconstruct the initial specification.
-- `spec/` is the intended behavioral contract for future changes.
-- `test/` protects selected regressions and non-trivial rules; it is not an exhaustive restatement of the spec.
-- `README.md` is user-facing operational documentation and may summarize the spec.
-- DSH/Cordis upstream behavior remains external. We document only the contracts this plugin depends on, not simulated copies of framework internals.
+- system/component boundaries;
+- Cordis/DSH integration points;
+- persistence ownership;
+- dependency direction;
+- lifecycle and data flow;
+- C4, data-flow, and UML views.
 
-If implementation and spec disagree after this baseline, treat the mismatch as something to resolve explicitly in the next change rather than silently editing one side.
+Material structural decisions belong here before they are projected into Spec.
 
-## Current scope
+### [`system.md`](./system.md) — agent-facing Spec
 
-The current product is a small authentication/reverse-proxy plugin in front of the DSH Web server. It owns:
+Projects only the Requirement and Architecture details an implementation agent needs in order to act correctly:
 
-- root token bootstrap;
-- browser session issuance and validation;
-- optional IP allowlist access;
-- trusted-proxy client-IP handling;
-- HTTP and WebSocket forwarding to the loopback DSH Web server;
-- Cordis-managed listener lifecycle.
+- observable behavior;
+- owning components;
+- contracts and invariants;
+- allowed/prohibited change surfaces;
+- failure behavior;
+- verification obligations.
 
-It does not own TLS termination, user accounts, multi-user authorization, persistent device trust, CDN-specific identity adapters, or a general-purpose network-security layer.
+Spec must not invent a new product or architecture decision.
 
-## Baseline status
+### [`verification.md`](./verification.md) — verification projection
 
-This spec describes the code merged through PR #3 and the current `0.3.0` unreleased line. The currently validated development target is Windows with Node 22.
+Defines the smallest evidence needed for the real affected surfaces. Test count, coverage percentage, CI job count, and platform-matrix size are not goals.
+
+## Change workflow
+
+For a behavior-changing change:
+
+1. update Requirement if product intent changed;
+2. update Architecture when ownership, state, data flow, lifecycle, or another material structural choice changed;
+3. re-project only the affected Spec obligations;
+4. build implementation Tasks from Requirement + Architecture + Spec;
+5. implement and verify against those artifacts.
+
+If implementation reveals a mismatch, repair the earliest authoritative layer that is actually wrong. Do not silently edit Requirement/Architecture to make existing code look correct.
+
+## Current correction
+
+The current authority now says:
+
+- browser bootstrap is one-time until session expiry, not merely until process restart;
+- session authorization therefore uses DSH's durable storage-domain capability and survives plugin/process recreation;
+- IP allowlist authentication is not a current product requirement and is excluded from core Spec and release verification;
+- the gateway remains a minimal DSH Web access gate rather than a general security proxy.
+
+The implementation merged through PR #3 does not yet fully satisfy that authority. In particular, its process-local session Map and current IP-allowlist surface are implementation deltas to be corrected in downstream work.
