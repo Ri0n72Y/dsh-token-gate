@@ -42,23 +42,19 @@ export function createDeviceSessionService(
       }
 
       const currentTime = now()
-      const existing = repository.getDevice(deviceId)
-      if (existing === undefined) {
-        await repository.putDevice(deviceId, {
-          authority: pending.authority,
-          browser: pending.browser,
-          createdAt: currentTime,
-          lastSeenAt: currentTime,
-          expiresAt: currentTime + ttlMs,
-          renewAfter: currentTime + renewalMs,
-          pairingId,
-        })
-      } else if (existing.authority !== pending.authority || existing.pairingId !== pairingId) {
-        throw new Error('token-gate: deterministic device session collides with another authorization')
+      const issued = await repository.issueDevice(pairingId, deviceId, {
+        authority: pending.authority,
+        browser: pending.browser,
+        createdAt: currentTime,
+        lastSeenAt: currentTime,
+        expiresAt: currentTime + ttlMs,
+        renewAfter: currentTime + renewalMs,
+        pairingId,
+      })
+      if (issued === undefined) {
+        throw new Error('token-gate: approved pending device disappeared or was revoked during session issue')
       }
 
-      const marked = await repository.markPendingIssued(pairingId, deviceId)
-      if (marked === undefined) throw new Error('token-gate: approved pending device disappeared during session issue')
       return {
         deviceId,
         bearer,
