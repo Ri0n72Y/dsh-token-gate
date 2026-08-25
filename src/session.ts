@@ -77,7 +77,8 @@ export function createDeviceSessionService(
         renewAfter: currentTime + renewalMs,
       }
       try {
-        await repository.renewDevice(deviceId, renewed)
+        const stillAuthorized = await repository.renewDevice(deviceId, renewed)
+        if (!stillAuthorized) return { allowed: false }
         return {
           allowed: true,
           deviceId,
