@@ -15,8 +15,11 @@ export function authorizationState(): AuthorizationState {
 
 export class MemoryAuthorizationRepository implements AuthorizationRepository {
   renewWrites = 0
+  readonly state: AuthorizationState
 
-  constructor(readonly state: AuthorizationState = authorizationState()) {}
+  constructor(state: AuthorizationState = authorizationState()) {
+    this.state = state
+  }
 
   getPending(id: string): PendingDeviceRecord | undefined {
     return this.state.pending.get(id)
