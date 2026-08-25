@@ -2,43 +2,47 @@
 
 ## Scope
 
-This repository is a small authentication/reverse-proxy boundary in front of DeepSeek Harness. Keep changes scoped to the DSH plugin contract: prefer small, explicit modules, fail-closed behavior, and provider-neutral proxy semantics over adding general-purpose network-security features.
+`dsh-token-gate` is a minimal authenticated browser entry point in front of DSH Web. It should remain smaller than a general authentication platform, reverse proxy, firewall, or WAF.
 
-## Invariants
+## Spec Driven Development
 
-- DSH upstream must remain bound to `127.0.0.1`; the gateway is the only entry presented to clients.
-- The gateway itself defaults to `127.0.0.1`; `0.0.0.0` listening must be an explicit deployment choice.
-- There is no implicit loopback bypass; any IP bypass must be explicit in `allowIps`.
-- `Host` never grants access by itself: sessions are authority-bound, and IP bypasses must pass the Host fence.
-- Forwarded client/protocol headers are ignored unless the socket peer is explicitly listed in `trustedProxies`.
-- Real client IP is either direct TCP peer (`realIpHeader=none`) or `X-Forwarded-For` resolved right-to-left through the trusted-proxy chain. Do not add provider-specific real-IP modes; normalize them at the deployment proxy instead.
-- Browser `Origin` and Fetch Metadata are validated before internal Host/Origin rewriting, including bootstrap requests.
-- Unauthenticated HTTP responses are intentionally indistinguishable.
-- Bootstrap is reserved only for `/?token=...`; application query parameters named `token` on other paths remain application-owned.
-- The bootstrap token and gateway session cookie must never be proxied to DSH.
-- The gateway session cookie remains `HttpOnly; SameSite=Lax`; add `Secure` only when the trusted request boundary reports HTTPS. Upstream `Set-Cookie` with the same cookie name must not overwrite it.
-- Request/response hop-by-hop headers are stripped. WebSocket forwarding rebuilds only the required `Connection: Upgrade` / `Upgrade` pair.
-- Malformed request targets and unexpected request-handler failures stay scoped to the affected request/socket; an upstream body abort must terminate the corresponding downstream response.
-- HTTP and WebSocket paths share the same access policy.
-- Cordis activation awaits gateway listen, and disposal does not resolve until the gateway listener and all tracked client sockets, including upgraded sockets, have closed.
-- Rate-limit identities and sessions have hard cardinality bounds.
+Use the repository artifacts in this authority order:
 
-## Spec-driven changes
+1. `spec/requirement.md` — product intent and acceptance direction.
+2. `spec/architecture.md` — structural design, ownership, dependencies, persistence, lifecycle, and data flow.
+3. `spec/system.md` — agent-facing implementation contract projected from Requirement + Architecture.
+4. development Tasks — concrete implementation decomposition built from all three.
+5. implementation — evidence of current state, not authority over the layers above it.
 
-- `spec/` is the lightweight behavioral contract. The initial baseline was reconstructed from the already-implemented code; future behavior changes should update the relevant requirement before or in the same PR as the implementation.
-- Reference stable requirement IDs such as `TG-AUTH-005` or `TG-WS-003` in behavior-changing PRs when useful.
-- Update architecture diagrams only when relationships, trust boundaries, state ownership, or data flows actually change. Do not use architecture diagrams as changelog decoration.
-- A requirement does not imply a dedicated test. Keep traceability lightweight and add tests only when they have independent regression value.
-- Real DSH/Cordis integration requirements should be validated against a real target profile when framework fixtures would merely simulate upstream internals.
+If code and Spec disagree, do not rewrite upstream intent merely to match existing code. Find the earliest incorrect/incomplete authority layer and propagate the correction downward.
+
+## Core architectural invariants
+
+- DSH Web remains bound to loopback; token-gate is the browser-facing entry boundary.
+- Bootstrap exchanges a configured secret for a browser session and removes the secret from the visible URL.
+- A valid browser session survives plugin/process recreation until its configured expiry.
+- Durable session state uses the DSH/Cordis storage-domain capability rather than a parallel persistence framework.
+- Authorized HTTP and WebSocket traffic stays transparent to DSH application behavior.
+- Gateway credentials do not leak upstream to DSH.
+- HTTP and WebSocket share the same authorization contract.
+- Cordis activation/disposal owns listener, connection, and opened-storage-domain lifecycle.
+- IP allowlist authentication is not part of the current product Requirement. Do not expand or test that surface unless Requirement is changed first.
 
 ## Testing discipline
 
-- Tests protect observable plugin behavior, non-trivial parsing/state rules, or a reproduced regression.
-- Do not simulate Cordis internals with fake `Context`/`effect` implementations merely to claim framework integration coverage.
-- Do not duplicate the same invariant at unit, integration, and framework layers unless each layer catches a distinct failure mode.
-- Coverage reports are diagnostic only. Never add tests, branches, fixtures, platform jobs, or production code solely to reach a percentage target.
-- Platform matrices must follow the plugin's actual supported/tested environment. The current development target is Windows with Node 22; broader matrices require a concrete platform-specific reason.
+- Add tests only when they protect user-observable behavior, durable state/lifecycle transitions, non-trivial protocol/state logic, reproduced regressions, or real DSH/Cordis contracts.
+- Do not simulate Cordis/storage internals merely to claim framework integration coverage when a real DSH profile is the meaningful contract.
+- Do not duplicate the same invariant at multiple test layers without independent failure value.
+- Coverage percentage, test count, CI job count, and platform-matrix size are diagnostic/operational choices, not quality goals.
+- The current supported validation target is Windows + Node 22; broaden it only for a real support target or reproduced platform-specific issue.
 
 ## Validation
 
-For release-facing changes run `pnpm run check` and `npm pack --dry-run --ignore-scripts`. `pnpm run test:coverage` may be used to inspect blind spots, but its percentage is not a release gate. Add regression tests only when they protect behavior affected by the change.
+For release-facing changes run:
+
+```sh
+pnpm run check
+npm pack --dry-run --ignore-scripts
+```
+
+For DSH/Cordis/storage integration changes, also run the real Web-profile acceptance flow in `spec/verification.md`.
