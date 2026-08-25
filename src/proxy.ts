@@ -55,7 +55,7 @@ export function forwardHeaders(
     if (lower === 'host' || lower === 'origin' || PROXY_IDENTITY_HEADERS.has(lower)) continue
     if (declaredHop.has(lower) || HOP_BY_HOP.has(lower)) continue
     if (lower === 'cookie' && typeof value === 'string') {
-      const cookie = auth.stripSessionCookie(value)
+      const cookie = auth.stripGatewayCookies(value)
       if (cookie !== undefined) out[key] = cookie
       continue
     }
@@ -82,13 +82,24 @@ export function sanitizeResponseHeaders(
     if (HOP_BY_HOP.has(lower) || declaredHop.has(lower)) continue
     if (lower === 'set-cookie') {
       const values = Array.isArray(value) ? value : value === undefined ? [] : [value]
-      const kept = values.filter(item => !auth.isSessionSetCookie(item))
+      const kept = values.filter(item => !auth.isGatewaySetCookie(item))
       if (kept.length > 0) out[key] = kept
       continue
     }
     out[key] = value
   }
   return out
+}
+
+function addGatewayCookie(
+  headers: Record<string, string | string[] | undefined>,
+  gatewayCookie: string | undefined,
+): void {
+  if (gatewayCookie === undefined) return
+  const current = headers['set-cookie']
+  if (current === undefined) headers['set-cookie'] = [gatewayCookie]
+  else if (Array.isArray(current)) headers['set-cookie'] = [...current, gatewayCookie]
+  else headers['set-cookie'] = [current, gatewayCookie]
 }
 
 function writeSocketHead(
@@ -128,6 +139,7 @@ export function proxyHttp(
   target: UpstreamTarget,
   auth: AuthService,
   logger: Logger,
+  refreshCookie?: string,
 ): void {
   const upstream = httpRequest({
     host: target.host,
@@ -141,7 +153,9 @@ export function proxyHttp(
       upstreamRes.destroy()
       return
     }
-    res.writeHead(upstreamRes.statusCode ?? 502, sanitizeResponseHeaders(upstreamRes.headers, auth))
+    const headers = sanitizeResponseHeaders(upstreamRes.headers, auth)
+    addGatewayCookie(headers, refreshCookie)
+    res.writeHead(upstreamRes.statusCode ?? 502, headers)
     upstreamRes.on('aborted', () => destroyResponse(res))
     upstreamRes.on('error', (error) => {
       logger.warn('token-gate: upstream response error: %s', String(error))
@@ -173,6 +187,7 @@ export function proxyUpgrade(
   target: UpstreamTarget,
   auth: AuthService,
   logger: Logger,
+  refreshCookie?: string,
 ): void {
   const upstream = httpRequest({
     host: target.host,
@@ -187,6 +202,7 @@ export function proxyUpgrade(
     const headers = sanitizeResponseHeaders(upstreamRes.headers, auth)
     headers.connection = 'Upgrade'
     if (typeof upstreamRes.headers.upgrade === 'string') headers.upgrade = upstreamRes.headers.upgrade
+    addGatewayCookie(headers, refreshCookie)
     writeSocketHead(socket, 101, upstreamRes.statusMessage ?? 'Switching Protocols', headers)
     if (upstreamHead.length > 0) socket.write(upstreamHead)
     if (head.length > 0) upstreamSocket.write(head)
@@ -203,11 +219,13 @@ export function proxyUpgrade(
       upstreamRes.destroy()
       return
     }
+    const headers = sanitizeResponseHeaders(upstreamRes.headers, auth)
+    addGatewayCookie(headers, refreshCookie)
     writeSocketResponse(
       socket,
       upstreamRes.statusCode ?? 502,
       upstreamRes.statusMessage ?? 'Bad Gateway',
-      sanitizeResponseHeaders(upstreamRes.headers, auth),
+      headers,
     )
     upstreamRes.on('aborted', () => socket.destroy())
     upstreamRes.on('error', (error) => {
