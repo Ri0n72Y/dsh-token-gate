@@ -7,6 +7,7 @@ export interface PendingDeviceRecord {
   expiresAt: number
   state: PendingState
   approvedAt?: number
+  issuedDeviceId?: string
 }
 
 export interface AuthorizedDeviceRecord {
@@ -16,6 +17,7 @@ export interface AuthorizedDeviceRecord {
   lastSeenAt: number
   expiresAt: number
   renewAfter: number
+  pairingId: string
 }
 
 interface ValueSchema<T> {
@@ -51,6 +53,7 @@ export interface AuthorizationRepository {
   listPending(now?: number): Array<{ id: string; record: PendingDeviceRecord }>
   putPending(id: string, record: PendingDeviceRecord): Promise<void>
   approvePending(id: string, now?: number): Promise<PendingDeviceRecord | undefined>
+  markPendingIssued(id: string, deviceId: string): Promise<PendingDeviceRecord | undefined>
   rejectPending(id: string): Promise<boolean>
   consumePending(id: string): Promise<boolean>
   getDevice(id: string): AuthorizedDeviceRecord | undefined
@@ -93,6 +96,7 @@ const pendingSchema: ValueSchema<PendingDeviceRecord> = {
       expiresAt: timestamp(raw.expiresAt, 'expiresAt'),
       state,
       approvedAt: raw.approvedAt === undefined ? undefined : timestamp(raw.approvedAt, 'approvedAt'),
+      issuedDeviceId: optionalText(raw.issuedDeviceId, 'issuedDeviceId'),
     }
   },
 }
@@ -107,6 +111,7 @@ const deviceSchema: ValueSchema<AuthorizedDeviceRecord> = {
       lastSeenAt: timestamp(raw.lastSeenAt, 'lastSeenAt'),
       expiresAt: timestamp(raw.expiresAt, 'expiresAt'),
       renewAfter: timestamp(raw.renewAfter, 'renewAfter'),
+      pairingId: text(raw.pairingId, 'pairingId'),
     }
   },
 }
@@ -132,7 +137,7 @@ export async function openAuthorizationRepository(facility: StorageDomainFacilit
 
     listPending(now = Date.now()) {
       return [...pending.entries()]
-        .filter(([, item]) => item.expiresAt > now)
+        .filter(([, item]) => item.state === 'pending' && item.expiresAt > now)
         .map(([id, item]) => ({ id, record: item }))
         .sort((a, b) => b.record.requestedAt - a.record.requestedAt)
     },
@@ -146,6 +151,14 @@ export async function openAuthorizationRepository(facility: StorageDomainFacilit
       if (current === undefined || current.expiresAt <= now) return undefined
       if (current.state === 'approved') return current
       return await pending.update(id, item => ({ ...item, state: 'approved', approvedAt: now }))
+    },
+
+    async markPendingIssued(id, deviceId) {
+      const current = pending.get(id)
+      if (current === undefined || current.state !== 'approved') return undefined
+      if (current.issuedDeviceId === deviceId) return current
+      if (current.issuedDeviceId !== undefined && current.issuedDeviceId !== deviceId) return undefined
+      return await pending.update(id, item => ({ ...item, issuedDeviceId: deviceId }))
     },
 
     rejectPending(id) {
