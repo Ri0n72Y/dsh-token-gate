@@ -58,7 +58,7 @@ export interface AuthorizationRepository {
   getDevice(id: string): AuthorizedDeviceRecord | undefined
   listDevices(now?: number): Array<{ id: string; record: AuthorizedDeviceRecord }>
   issueDevice(pairingId: string, deviceId: string, record: AuthorizedDeviceRecord): Promise<AuthorizedDeviceRecord | undefined>
-  renewDevice(id: string, record: AuthorizedDeviceRecord): Promise<void>
+  renewDevice(id: string, record: AuthorizedDeviceRecord): Promise<boolean>
   revokeAuthorization(deviceId: string): Promise<boolean>
   close(): Promise<void>
 }
@@ -198,7 +198,13 @@ export async function openAuthorizationRepository(facility: StorageDomainFacilit
     },
 
     renewDevice(id, item) {
-      return devices.put(id, item)
+      return serialize(async () => {
+        const current = devices.get(id)
+        if (current === undefined) return false
+        if (current.pairingId !== item.pairingId || current.authority !== item.authority) return false
+        await devices.put(id, item)
+        return true
+      })
     },
 
     revokeAuthorization(deviceId) {
