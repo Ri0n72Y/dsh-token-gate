@@ -80,9 +80,13 @@ export class MemoryAuthorizationRepository implements AuthorizationRepository {
     return this.state.devices.get(deviceId) ?? record
   }
 
-  async renewDevice(id: string, record: AuthorizedDeviceRecord): Promise<void> {
+  async renewDevice(id: string, record: AuthorizedDeviceRecord): Promise<boolean> {
+    const current = this.state.devices.get(id)
+    if (current === undefined) return false
+    if (current.pairingId !== record.pairingId || current.authority !== record.authority) return false
     this.renewWrites += 1
     this.state.devices.set(id, record)
+    return true
   }
 
   async revokeAuthorization(deviceId: string): Promise<boolean> {
