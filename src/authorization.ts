@@ -53,14 +53,13 @@ export interface AuthorizationRepository {
   listPending(now?: number): Array<{ id: string; record: PendingDeviceRecord }>
   putPending(id: string, record: PendingDeviceRecord): Promise<void>
   approvePending(id: string, now?: number): Promise<PendingDeviceRecord | undefined>
-  markPendingIssued(id: string, deviceId: string): Promise<PendingDeviceRecord | undefined>
   rejectPending(id: string): Promise<boolean>
   consumePending(id: string): Promise<boolean>
   getDevice(id: string): AuthorizedDeviceRecord | undefined
   listDevices(now?: number): Array<{ id: string; record: AuthorizedDeviceRecord }>
-  putDevice(id: string, record: AuthorizedDeviceRecord): Promise<void>
+  issueDevice(pairingId: string, deviceId: string, record: AuthorizedDeviceRecord): Promise<AuthorizedDeviceRecord | undefined>
   renewDevice(id: string, record: AuthorizedDeviceRecord): Promise<void>
-  revokeDevice(id: string): Promise<boolean>
+  revokeAuthorization(deviceId: string): Promise<boolean>
   close(): Promise<void>
 }
 
@@ -129,6 +128,13 @@ export async function openAuthorizationRepository(facility: StorageDomainFacilit
   const domain = await facility.open(authorizationDomainSpec)
   const pending = domain.table('pending')
   const devices = domain.table('devices')
+  let mutationTail: Promise<void> = Promise.resolve()
+
+  function serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const run = mutationTail.then(operation, operation)
+    mutationTail = run.then(() => undefined, () => undefined)
+    return run
+  }
 
   return {
     getPending(id) {
@@ -137,7 +143,7 @@ export async function openAuthorizationRepository(facility: StorageDomainFacilit
 
     listPending(now = Date.now()) {
       return [...pending.entries()]
-        .filter(([, item]) => item.state === 'pending' && item.expiresAt > now)
+        .filter(([, item]) => item.issuedDeviceId === undefined && item.expiresAt > now)
         .map(([id, item]) => ({ id, record: item }))
         .sort((a, b) => b.record.requestedAt - a.record.requestedAt)
     },
@@ -148,17 +154,9 @@ export async function openAuthorizationRepository(facility: StorageDomainFacilit
 
     async approvePending(id, now = Date.now()) {
       const current = pending.get(id)
-      if (current === undefined || current.expiresAt <= now) return undefined
+      if (current === undefined || current.expiresAt <= now || current.issuedDeviceId !== undefined) return undefined
       if (current.state === 'approved') return current
       return await pending.update(id, item => ({ ...item, state: 'approved', approvedAt: now }))
-    },
-
-    async markPendingIssued(id, deviceId) {
-      const current = pending.get(id)
-      if (current === undefined || current.state !== 'approved') return undefined
-      if (current.issuedDeviceId === deviceId) return current
-      if (current.issuedDeviceId !== undefined && current.issuedDeviceId !== deviceId) return undefined
-      return await pending.update(id, item => ({ ...item, issuedDeviceId: deviceId }))
     },
 
     rejectPending(id) {
@@ -180,20 +178,43 @@ export async function openAuthorizationRepository(facility: StorageDomainFacilit
         .sort((a, b) => b.record.lastSeenAt - a.record.lastSeenAt)
     },
 
-    putDevice(id, item) {
-      return devices.put(id, item)
+    issueDevice(pairingId, deviceId, item) {
+      return serialize(async () => {
+        const pairing = pending.get(pairingId)
+        if (pairing === undefined || pairing.state !== 'approved') return undefined
+        if (pairing.issuedDeviceId !== undefined && pairing.issuedDeviceId !== deviceId) return undefined
+
+        const existing = devices.get(deviceId)
+        if (existing !== undefined) {
+          if (existing.pairingId !== pairingId || existing.authority !== item.authority) return undefined
+        } else {
+          await devices.put(deviceId, item)
+        }
+        if (pairing.issuedDeviceId === undefined) {
+          await pending.put(pairingId, { ...pairing, issuedDeviceId: deviceId })
+        }
+        return devices.get(deviceId) ?? item
+      })
     },
 
     renewDevice(id, item) {
       return devices.put(id, item)
     },
 
-    revokeDevice(id) {
-      return devices.delete(id)
+    revokeAuthorization(deviceId) {
+      return serialize(async () => {
+        const item = devices.get(deviceId)
+        if (item === undefined) return false
+        // Remove the pairing credential first so an approved exchange cannot
+        // recreate the device after the durable revocation starts.
+        await pending.delete(item.pairingId)
+        return await devices.delete(deviceId)
+      })
     },
 
-    close() {
-      return domain.close()
+    async close() {
+      await mutationTail
+      await domain.close()
     },
   }
 }
