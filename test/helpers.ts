@@ -46,6 +46,8 @@ export class MemoryAuthorizationRepository implements AuthorizationRepository {
   }
 
   async rejectPending(id: string): Promise<boolean> {
+    const current = this.state.pending.get(id)
+    if (current === undefined || current.issuedDeviceId !== undefined) return false
     return this.state.pending.delete(id)
   }
 
