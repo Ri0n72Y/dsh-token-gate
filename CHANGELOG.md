@@ -2,27 +2,24 @@
 
 ## 0.3.0 - Unreleased
 
-### Security
+### Product / specification
 
-- Remove implicit loopback bypass and require the DSH upstream web server to remain bound to `127.0.0.1`.
-- Default the gateway itself to `127.0.0.1`; direct `0.0.0.0` listening now requires explicit configuration.
-- Make trusted proxies explicit and resolve `X-Forwarded-For` from the right through the trusted chain; provider-specific real-IP modes are no longer part of the gateway surface.
-- Bind sessions to the authority used during bootstrap and apply the Host/Origin/Fetch-Metadata browser-trust checks to bootstrap as well as authenticated traffic.
-- Require IP allowlist bypasses to pass a Host fence; named authorities must be declared in `trustedHosts`.
-- Replace the script-bearing 404/bootstrap API with a root-only query-token exchange and a uniform opaque 404 response.
+- Define the product as a minimal authenticated browser access gate for DSH Web rather than a general security proxy.
+- Restore the SDD authority order: Requirement → Architecture/Design → Spec → Task; current implementation is evidence, not authority over the upstream artifacts.
+- Require browser sessions to remain valid until expiry across DSH/token-gate process recreation.
+- Select the existing DSH `storageDomain` capability as the persistence seam for token-gate sessions; the host profile owns the physical backend.
+- Remove IP allowlist authentication from the current product Requirement and release-verification scope; it remains only a possible future direction.
+- Record the current process-local session Map and IP-allowlist surface as implementation deltas that still need downstream alignment.
+
+### Security / engineering already implemented
+
+- Keep DSH upstream on `127.0.0.1` and default the gateway itself to loopback.
+- Bind sessions to the external authority used during bootstrap and apply browser Host/Origin/Fetch-Metadata trust checks before proxy rewriting.
+- Reserve bootstrap ownership for the root token query and use the same opaque denial surface for unauthorized traffic.
 - Keep the gateway session cookie `HttpOnly; SameSite=Lax`, add `Secure` for trusted HTTPS ingress, strip it before forwarding to DSH, and filter same-name upstream `Set-Cookie` responses.
 - Strip external proxy-identity and hop-by-hop headers; WebSocket upgrades rebuild only the required `Connection: Upgrade` / `Upgrade` pair.
-- Bound both rate-limit identity state and active session state.
-- Compare bootstrap tokens through fixed-size SHA-256 digests and validate configured cookie names.
-- Fail closed when no bootstrap token is configured unless generated-token development mode is explicitly enabled.
-
-### Engineering
-
-- Split the gateway into config, network, access, auth, proxy, upstream, gateway lifecycle, and Cordis entry modules.
-- Make Cordis activation/disposal await listen and close, so listen failures fail the fiber and HMR waits for listener and tracked client-socket teardown, including upgraded sockets.
-- Contain malformed request targets and unexpected request-handler exceptions to the affected request/socket instead of allowing them to escape the Node server callback.
+- Contain malformed request targets and unexpected request-handler exceptions to the affected request/socket.
 - Terminate downstream HTTP responses when the DSH upstream aborts mid-body.
-- Correct WebSocket proxy semantics for non-101 responses, sanitized upgrade headers, upstream cookie ownership, and early `head` bytes.
-- Keep the Node test-runner suite focused on observable gateway behavior and non-trivial parser/state rules; remove simulated Cordis lifecycle coverage and duplicate helper-level assertions.
-- Treat coverage output as a diagnostic instead of a percentage gate, so tests are not added solely to improve a score.
-- Keep CI aligned with the current test target: one Windows + Node 22 job running install, `pnpm run check`, and a script-free tarball inspection.
+- Correct WebSocket proxy semantics for non-101 responses, sanitized upgrade headers, upstream cookie ownership, early `head` bytes, and paired teardown.
+- Keep the Node test-runner suite focused on observable gateway behavior and non-trivial parser/state rules; coverage output remains diagnostic rather than a release percentage gate.
+- Keep CI aligned with the current validated target: Windows + Node 22.
