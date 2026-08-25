@@ -2,154 +2,212 @@
 
 Status: **projection of `requirement.md` and `architecture.md`**
 
-This document is the agent-facing implementation contract. Product intent comes from [`requirement.md`](./requirement.md); structural authority comes from [`architecture.md`](./architecture.md).
+This is the agent-facing implementation contract. Product intent comes from [`requirement.md`](./requirement.md); structural authority comes from [`architecture.md`](./architecture.md).
 
 ## 1. Scope
 
-Implement a minimal authenticated entry point in front of DSH Web.
-
 The plugin owns:
 
-- root-token bootstrap;
-- durable browser sessions;
+- root-token device pairing;
+- durable pending and authorized-device state;
+- host approval/rejection/revocation operations;
+- durable sliding browser sessions;
 - request authorization;
 - HTTP/WebSocket proxying to loopback DSH Web;
-- Cordis-managed listener and storage lifecycle.
+- Cordis-managed listener/storage lifecycle;
+- a small DSH Web client/settings surface for host device management.
 
-The plugin does not own TLS termination, user accounts, IP allowlist authentication, or DSH application behavior.
+It does not own TLS termination, user accounts, IP allowlist authentication, or DSH application behavior.
 
 ## 2. Required dependencies and ownership
 
-- The plugin MUST inject the DSH `webServer` service and reject activation when the upstream is not loopback-only.
-- The plugin MUST consume DSH `storageDomain` for durable session state.
-- Session persistence MUST live in a token-gate-owned storage domain; the physical backend remains host/profile owned.
-- Proxy transport MUST NOT contain authentication policy beyond consuming an allow/deny decision.
+- The Host plugin MUST inject DSH `webServer` and reject activation when the upstream is not loopback-only.
+- The Host plugin MUST consume DSH `storageDomain` for durable authorization state.
+- Physical storage backend selection remains host/profile owned.
+- Host device-management operations MUST own authorization mutations; the browser settings card is presentation only.
+- Proxy transport MUST consume an authorization decision and MUST NOT own pairing/device policy.
+- The management UI SHOULD use DSH's existing `dsh.client`/settings/client-remote extension surfaces rather than create a standalone admin server.
 
-## 3. Bootstrap contract
+## 3. Pairing contract
 
-### TG-BOOT-001 — Token source
+### TG-PAIR-001 — Bootstrap secret
 
 A non-empty configured token or `DSH_AUTH_TOKEN` MUST provide the bootstrap secret. Development-only generated-token fallback MAY remain available when explicitly enabled. Activation MUST fail when no usable secret exists.
 
-### TG-BOOT-002 — Bootstrap ownership
+### TG-PAIR-002 — Bootstrap ownership
 
-Only a `GET` request to the root path with a non-empty `token` query parameter is a gateway bootstrap request. Application-path query parameters named `token` remain DSH-owned.
+Only a `GET` request to the root path with a non-empty `token` query parameter is a gateway pairing request. Application-path query parameters named `token` remain DSH-owned.
 
-### TG-BOOT-003 — Successful bootstrap
+### TG-PAIR-003 — Pending request, not immediate access
 
-A valid bootstrap MUST:
+A valid bootstrap token MUST NOT directly authorize DSH access.
 
-1. create an opaque session bearer;
-2. persist its server-side session record before success is returned;
-3. bind the record to the external request authority and an expiry timestamp;
-4. set an HttpOnly, `SameSite=Lax`, `Path=/` cookie with matching lifetime;
-5. add `Secure` when the trusted request boundary reports HTTPS;
-6. return `303` to the same URL with only the gateway bootstrap token removed.
+It MUST create or resume a short-lived pending device-authorization request and remove the bootstrap secret from the visible URL. The remote browser MAY receive a temporary opaque pairing bearer/state sufficient to wait for the host decision.
 
-If durable session creation fails, bootstrap MUST fail rather than returning a cookie that cannot survive restart.
+Pending state MUST be durable before the gateway reports that the request is awaiting host approval.
 
-## 4. Durable session contract
+### TG-PAIR-004 — Approval exchange
 
-### TG-SESS-001 — Persistent record
+Only a host-approved, unexpired pending request MAY be exchanged for an authorized device session.
 
-The durable session record MUST contain at least:
+The exchange MUST durably create the authorized-device record before issuing the long-lived session cookie. The pending request MUST then be consumed or otherwise made unusable for creating additional sessions.
+
+Rejected, expired, missing, or already-consumed pending requests MUST NOT authorize DSH.
+
+## 4. Durable device session contract
+
+### TG-SESS-001 — Persistent authorized-device record
+
+The durable record MUST contain enough state to validate and manage the device, including at least:
 
 - external authority;
-- absolute expiry time.
+- creation time;
+- last-seen/last-renewed time;
+- absolute current expiry;
+- next renewal threshold;
+- minimal distinguishing metadata for the host device list.
 
-The raw cookie bearer SHOULD NOT need to be persisted; repository lookup SHOULD use a stable one-way derived key.
+The raw session bearer SHOULD NOT be persisted. Repository lookup SHOULD use a stable one-way derived key.
 
 ### TG-SESS-002 — Restart survival
 
-A session that has not expired MUST remain valid after DSH/token-gate process restart or plugin recreation, provided its durable record still exists.
+An unexpired, non-revoked authorized device MUST remain valid after DSH/token-gate process restart or plugin recreation when the durable record still exists.
 
-Closing the token-gate storage-domain handle MUST release runtime resources without deleting valid session records.
+Closing the storage-domain handle MUST release runtime resources without deleting valid device records.
 
-### TG-SESS-003 — Expiry and authority
+### TG-SESS-003 — Sliding inactivity expiry
 
-A request MUST be denied when the persisted session is absent, expired, or bound to a different external authority.
+Session lifetime MUST slide forward with successful use.
 
-Expiry enforcement is required; physical cleanup of expired records MAY be lazy.
+Authorization MUST always enforce the currently durable expiry. To avoid a durable write on every request, renewal SHOULD be coalesced: by default, the first successful request after approximately 24 hours SHOULD persist a new `expiresAt`, update last-seen/renewal metadata, and refresh the browser cookie lifetime.
 
-### TG-SESS-004 — Cookie isolation
+When renewal is not yet due, an otherwise valid request MUST NOT require a durable write merely to authorize.
 
-The gateway session cookie MUST be consumed by token-gate and stripped before forwarding to DSH. DSH responses MUST NOT be allowed to overwrite the gateway-owned cookie name; unrelated application cookies remain intact.
+If a renewal write fails while the old durable deadline is still valid, the current request MAY proceed under the old deadline, but no longer expiry/cookie lifetime may be claimed until the durable renewal succeeds.
 
-## 5. Access contract
+### TG-SESS-004 — Validation
 
-### TG-ACCESS-001 — Denial
+A request MUST be denied when the device record is absent, expired, revoked/invalidated, or bound to a different external authority.
 
-Requests that are neither a successful bootstrap nor backed by a valid session MUST NOT reach DSH.
+Physical cleanup of expired records MAY be lazy.
 
-Denied HTTP traffic MUST use the same small opaque denial surface. Denied WebSocket upgrades MUST close/reject without introducing a separate public authentication/status API.
+### TG-SESS-005 — Cookie isolation
+
+The gateway session cookie MUST be HttpOnly, `SameSite=Lax`, `Path=/`, and carry the current session lifetime. `Secure` MUST be added for trusted HTTPS ingress.
+
+The gateway cookie MUST be stripped before forwarding to DSH. DSH responses MUST NOT overwrite the gateway-owned cookie name; unrelated DSH cookies remain intact.
+
+## 5. Host device-management contract
+
+### TG-MGMT-001 — Host-visible state
+
+The host management surface MUST show:
+
+- pending device requests;
+- authorized devices;
+- distinguishing metadata plus created/last-seen/expiry information sufficient to identify active devices.
+
+The management surface MUST be reachable through the host's local DSH Web environment and MUST NOT require exposing a separate public administration application.
+
+### TG-MGMT-002 — Host decisions
+
+The host MUST be able to:
+
+- approve a pending request;
+- reject a pending request;
+- revoke an authorized device.
+
+These operations MUST mutate durable authorization state.
+
+### TG-MGMT-003 — Revocation
+
+Revoking a device MUST invalidate its existing session on subsequent requests without requiring a process restart.
+
+Revocation is not a permanent ban. A revoked device MAY later present the bootstrap secret, create a new pending request, and regain access only after a new host approval.
+
+## 6. Access contract
+
+### TG-ACCESS-001 — DSH access requires authorized device
+
+Only a valid authorized-device session may reach DSH.
+
+A browser with a valid pairing state but no approval may access only the minimal pairing/waiting surface needed to observe host approval/rejection. Invalid bootstrap attempts and unrelated unauthorized traffic MUST NOT reach DSH.
 
 ### TG-ACCESS-002 — Browser boundary
 
-Before internal Host/Origin rewriting, the gateway MUST validate the external request authority and MUST reject clearly cross-site browser requests. When an HTTP(S) `Origin` is present, its authority MUST match the external request authority.
+Before internal Host/Origin rewriting, the gateway MUST validate the external request authority and reject clearly cross-site browser requests. When an HTTP(S) `Origin` is present, its authority MUST match the external request authority.
 
 Client IP is not part of the current authorization contract.
 
-## 6. Proxy contract
+## 7. Proxy contract
 
 ### TG-PROXY-001 — Upstream
 
-DSH Web MUST remain bound to `127.0.0.1`; token-gate uses that injected listener as its upstream.
-
-The gateway listener SHOULD default to loopback. Direct network binding is an explicit deployment choice.
+DSH Web MUST remain bound to `127.0.0.1`; token-gate uses that injected listener as its upstream. The gateway listener SHOULD default to loopback; direct network binding is an explicit deployment choice.
 
 ### TG-PROXY-002 — HTTP
 
-Authorized HTTP requests MUST be forwarded as streaming requests/responses. Gateway-owned credentials and hop-by-hop transport headers MUST not leak across the proxy boundary. Internal `Host`/`Origin` values MUST be rewritten to the loopback DSH authority as required by DSH Web.
+Authorized HTTP requests MUST be streamed to/from DSH. Gateway-owned credentials and hop-by-hop transport headers MUST not leak across the proxy boundary. Internal `Host`/`Origin` MUST be rewritten as required by loopback DSH Web.
 
 Upstream failure after response start MUST terminate the downstream response rather than leave it hanging.
 
 ### TG-PROXY-003 — WebSocket
 
-Authorized WebSocket upgrades MUST use the same authorization decision as HTTP. Upgrade headers MUST be canonicalized, non-101 upstream responses MUST be relayed as ordinary HTTP, early client bytes MUST not be sent upstream before acceptance, and either-side closure/error MUST tear down the paired connection.
+Authorized WebSocket upgrades MUST use the same device authorization decision as HTTP. Upgrade headers MUST be canonicalized; non-101 upstream responses MUST be relayed as ordinary HTTP; early client bytes MUST wait for upstream acceptance; either-side closure/error MUST tear down the paired connection.
 
-## 7. Lifecycle contract
+## 8. Lifecycle contract
 
 ### TG-LIFE-001 — Activation
 
-Activation MUST open the token-gate session domain and wait for the gateway listener to become ready. Acquisition failure MUST fail plugin activation.
+Activation MUST open the token-gate authorization domain and wait for the gateway listener to become ready. Required service/storage/listener acquisition failures MUST fail plugin activation.
 
 ### TG-LIFE-002 — Disposal
 
-Disposal MUST stop accepting new gateway traffic, close tracked client connections including upgraded sockets, close the opened session-domain handle, and resolve only after owned runtime resources have settled.
+Disposal MUST stop accepting new gateway traffic, close tracked client connections including upgraded sockets, close the authorization-domain handle, and resolve only after owned runtime resources settle.
 
-Durable session records MUST remain available to the next plugin/process instance.
+Durable pending/device records MUST not be deleted merely because the plugin/process stops.
 
-## 8. Configuration surface
+## 9. Configuration surface
 
 The intended core configuration is limited to:
 
 - bootstrap secret source;
-- cookie name and session lifetime;
+- gateway and temporary pairing cookie names if separate cookies are used;
+- device/session inactivity lifetime;
+- renewal interval, defaulting to approximately 24 hours;
 - gateway bind/port;
-- trusted transport metadata needed to distinguish trusted HTTPS ingress when a deployment proxy is used;
+- trusted transport metadata needed to distinguish trusted HTTPS ingress;
 - explicit development-only generated-token fallback.
 
-Legacy configuration related to IP allowlist/client-IP authorization is not part of the current product contract and may be removed during implementation alignment.
+Legacy IP allowlist/client-IP configuration is outside the current product contract and may be removed during implementation alignment.
 
-## 9. Failure behavior
+## 10. Failure behavior
 
 - Missing required DSH/Cordis services: fail activation.
 - DSH upstream exposed beyond loopback: fail activation.
-- Durable session domain cannot open: fail activation.
-- Bootstrap secret invalid or durable write fails: deny bootstrap.
-- Session missing/expired/authority mismatch: deny request.
-- Unexpected per-request proxy failure: contain it to the affected request/socket when possible rather than intentionally terminating DSH.
+- Durable authorization domain cannot open: fail activation.
+- Invalid bootstrap secret: deny without creating pending state.
+- Pending-state durable write fails: do not report a pending request.
+- Device-session durable write fails: do not issue an authorizing cookie.
+- Session missing/expired/revoked/authority mismatch: deny DSH access.
+- Renewal write fails: retain only the previously durable expiry; do not claim extension.
+- Unexpected per-request proxy failure: contain it to the affected request/socket when possible.
 
-## 10. Verification obligations
+## 11. Verification obligations
 
 Verification MUST establish at least:
 
-- valid bootstrap persists a session before returning success;
-- the same cookie remains authorized after process/plugin restart and stops authorizing after expiry;
+- valid token creates pending state but cannot access DSH before host approval;
+- host approval creates a durable device session and rejection does not;
+- the same cookie remains authorized after process/plugin restart;
+- the first request after the renewal interval extends durable expiry and cookie lifetime, while requests inside the interval do not require repeated durable writes;
+- host revocation invalidates the old cookie and the device can pair again through token + new approval;
+- expired/wrong-authority/missing device records are denied;
+- the host can list pending and authorized devices through the DSH Web management surface;
 - unauthorized traffic does not reach DSH;
 - HTTP and WebSocket DSH behavior remains usable through the gate;
 - gateway credentials are not forwarded upstream;
-- Cordis disposal closes owned connections without deleting durable sessions;
+- Cordis disposal closes owned resources without deleting durable authorization records;
 - the plugin works in a real Windows + Node 22 DSH Web profile.
 
 Verification scope is driven by these behaviors and architectural contracts, not by test count or coverage percentage.
