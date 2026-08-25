@@ -8,13 +8,12 @@
 # Production is fail-closed: set DSH_AUTH_TOKEN in the DSH process environment
 # or provide config.token in a private patch layer. Do not commit secrets here.
 #
-# Forwarded headers are NOT trusted by default. Example for a local Caddy:
+# Forwarded HTTPS metadata is NOT trusted by default. When TLS terminates at a
+# local reverse proxy, list only that proxy as trusted so token-gate can attach
+# Secure to its pairing/session cookies. Example:
 #   - id: token-gate
 #     config:
 #       trustedProxies: ['127.0.0.1/32']
-#       realIpHeader: 'x-forwarded-for'
-#       trustedHosts: ['dsh.example.com'] # required for named-host IP allowlist bypass
-#       allowIps: ['192.168.1.0/24']
 #
 # Applied with: dsh plugin --profile web add .
 
