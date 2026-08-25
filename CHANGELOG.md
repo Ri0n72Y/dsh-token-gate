@@ -21,6 +21,7 @@
 - Add a minimal `/_token-gate/wait` + status exchange for remote pairing without exposing DSH before approval.
 - Add sliding session renewal with a configurable coalescing interval; ordinary requests do not write durable state until renewal is due.
 - Preserve the old durable deadline when a renewal write fails instead of claiming a longer browser lifetime.
+- Serialize session issue, renewal and host revocation through the repository mutation chain so an in-flight exchange/renewal cannot recreate a revoked device.
 - Register host-only device management routes on the loopback DSH Web server and block those routes at the remote gateway boundary.
 - Add a DSH Web client contribution under Plugins settings for listing, approving, rejecting and revoking devices.
 - Remove IP allowlist authorization and its obsolete configuration/test surface while retaining trusted-proxy metadata only for HTTPS cookie semantics.
