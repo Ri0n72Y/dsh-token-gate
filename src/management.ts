@@ -94,12 +94,8 @@ export function createDeviceManagementService(repository: AuthorizationRepositor
       return repository.rejectPending(id)
     },
 
-    async revoke(id) {
-      const item = repository.getDevice(id)
-      if (item === undefined) return false
-      const deleted = await repository.revokeDevice(id)
-      if (deleted) await repository.consumePending(item.pairingId)
-      return deleted
+    revoke(id) {
+      return repository.revokeAuthorization(id)
     },
   }
 }
