@@ -33,9 +33,10 @@ function config(overrides: Partial<Config> = {}): Config {
 
 test('pairing rejection, expiry and consumed state remain non-authorizing while host state is observable', async () => {
   const repository = new MemoryAuthorizationRepository()
-  const auth = createAuthService(config({ pendingTtlMinutes: 1 }), TOKEN)
-  let clock = 1_000
-  const pairing = createPairingService(config({ pendingTtlMinutes: 1 }), auth, repository, () => clock)
+  const cfg = config({ pendingTtlMinutes: 1 })
+  const auth = createAuthService(cfg, TOKEN)
+  let clock = Date.now()
+  const pairing = createPairingService(cfg, auth, repository, () => clock)
   const management = createDeviceManagementService(repository)
 
   const rejected = await pairing.request('dsh.example.com', 'Browser A')
