@@ -1,20 +1,14 @@
 import { randomBytes } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
 
-export type RealIpHeader = 'none' | 'x-forwarded-for'
-
 export interface Config {
   token?: string
   cookieName: string
+  pairingCookieName: string
   sessionTtlDays: number
-  sessionMax: number
-  rateMax: number
-  rateWindowMinutes: number
-  rateMaxKeys: number
-  allowIps: string[]
+  renewalIntervalHours: number
+  pendingTtlMinutes: number
   trustedProxies: string[]
-  trustedHosts: string[]
-  realIpHeader: RealIpHeader
   allowGeneratedToken: boolean
   bind: '0.0.0.0' | '127.0.0.1'
   port: number
@@ -23,18 +17,11 @@ export interface Config {
 export const Config: Schema<Config> = Schema.object({
   token: Schema.string(),
   cookieName: Schema.string().default('dsh_session'),
+  pairingCookieName: Schema.string().default('dsh_pairing'),
   sessionTtlDays: Schema.natural().min(1).max(365).default(30),
-  sessionMax: Schema.natural().min(1).max(100000).default(4096),
-  rateMax: Schema.natural().min(1).default(10),
-  rateWindowMinutes: Schema.natural().min(1).default(15),
-  rateMaxKeys: Schema.natural().min(1).max(100000).default(2048),
-  allowIps: Schema.array(String).default([]),
+  renewalIntervalHours: Schema.natural().min(1).max(720).default(24),
+  pendingTtlMinutes: Schema.natural().min(1).max(1440).default(15),
   trustedProxies: Schema.array(String).default([]),
-  trustedHosts: Schema.array(String).default([]),
-  realIpHeader: Schema.union([
-    Schema.const('none'),
-    Schema.const('x-forwarded-for'),
-  ]).default('x-forwarded-for'),
   allowGeneratedToken: Schema.boolean().default(false),
   bind: Schema.union([Schema.const('0.0.0.0'), Schema.const('127.0.0.1')]).default('127.0.0.1'),
   port: Schema.natural().min(1).max(65535).default(3081),
@@ -43,6 +30,15 @@ export const Config: Schema<Config> = Schema.object({
 export interface ResolvedToken {
   value: string
   source: 'config' | 'env' | 'generated'
+}
+
+export function validateConfig(config: Config): void {
+  if (config.cookieName === config.pairingCookieName) {
+    throw new Error('token-gate: session and pairing cookie names must differ')
+  }
+  if (config.renewalIntervalHours * 60 * 60 * 1000 >= config.sessionTtlDays * 24 * 60 * 60 * 1000) {
+    throw new Error('token-gate: renewalIntervalHours must be shorter than sessionTtlDays')
+  }
 }
 
 export function resolveToken(config: Config): ResolvedToken {

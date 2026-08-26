@@ -1,7 +1,7 @@
 {
   "name": "dsh-token-gate",
   "version": "0.3.0",
-  "description": "Opaque token-bootstrap gateway for DeepSeek Harness with HttpOnly sessions, IP allowlists, trusted-proxy handling, and reverse proxying",
+  "description": "Host-approved device access gateway for DeepSeek Harness with durable browser sessions and transparent HTTP/WebSocket proxying",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -28,11 +28,13 @@
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib/**/*.js",
+    "lib/**/*.js.map",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -43,6 +45,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings-plugins"
+      ]
     }
   },
   "scripts": {

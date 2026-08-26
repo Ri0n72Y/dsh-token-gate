@@ -1,19 +1,19 @@
 import { isIP } from 'node:net'
 import type { IncomingMessage } from 'node:http'
 import type { Config } from './config.ts'
-import type { AuthService } from './auth.ts'
 import { firstHeader, IpSet, normalizeIp } from './net.ts'
 
-export type AccessDecision = 'allow' | 'bootstrap' | 'deny'
+export const HOST_ADMIN_PREFIX = '/__token-gate'
+export const PAIRING_PREFIX = '/_token-gate'
 
 export interface AccessPolicy {
-  decide(req: IncomingMessage): AccessDecision
   bootstrapToken(req: IncomingMessage): string | undefined
   cleanBootstrapLocation(req: IncomingMessage): string
-  clientIp(req: IncomingMessage): string
   isSecure(req: IncomingMessage): boolean
   requestAuthority(req: IncomingMessage): string | undefined
   isBrowserTrusted(req: IncomingMessage): boolean
+  isHostAdminPath(req: IncomingMessage): boolean
+  isPairingPath(req: IncomingMessage): boolean
 }
 
 function requestUrl(req: IncomingMessage): URL | undefined {
@@ -34,65 +34,16 @@ function parseAuthority(authority: string, scheme = 'http:'): URL | undefined {
   }
 }
 
-function canonicalConfiguredAuthority(entry: string, entryUrl: URL): string {
-  const port = entryUrl.port !== '' ? entryUrl.port : new URL(`https://${entry}`).port
-  return port === '' ? entryUrl.hostname : `${entryUrl.hostname}:${port}`
+function isPrefixPath(pathname: string, prefix: string): boolean {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`)
 }
 
-function assertTrustedAuthority(entry: string): void {
-  const entryUrl = parseAuthority(entry)
-  if (entryUrl !== undefined && canonicalConfiguredAuthority(entry, entryUrl) === entry.toLowerCase()) return
-  throw new Error(`token-gate: trustedHosts entry ${JSON.stringify(entry)} is not a canonical host[:port] authority`)
-}
-
-function isTrustedAuthority(hostUrl: URL, trustedHosts: readonly string[]): boolean {
-  return trustedHosts.some((entry) => {
-    const entryUrl = parseAuthority(entry)
-    if (entryUrl === undefined) return false
-    return canonicalConfiguredAuthority(entry, entryUrl) === entryUrl.hostname
-      ? entryUrl.hostname === hostUrl.hostname
-      : entryUrl.host === hostUrl.host
-  })
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-  if (hostname.toLowerCase() === 'localhost') return true
-  const ip = normalizeIp(hostname)
-  if (ip === '::1') return true
-  return isIP(ip) === 4 && ip.startsWith('127.')
-}
-
-function isIpLiteralHostname(hostname: string): boolean {
-  return isIP(normalizeIp(hostname)) !== 0
-}
-
-export function createAccessPolicy(config: Config, auth: AuthService): AccessPolicy {
-  const allowedIps = new IpSet(config.allowIps)
+export function createAccessPolicy(config: Config): AccessPolicy {
   const trustedProxies = new IpSet(config.trustedProxies)
-  for (const entry of config.trustedHosts) assertTrustedAuthority(entry)
 
   function peerIp(req: IncomingMessage): string {
     const peer = normalizeIp(req.socket.remoteAddress)
     return isIP(peer) === 0 ? '' : peer
-  }
-
-  function forwardedForClient(req: IncomingMessage, peer: string): string {
-    const raw = firstHeader(req.headers, 'x-forwarded-for')
-    if (raw === undefined || raw.trim().length === 0) return ''
-    const chain = raw.split(',').map(value => normalizeIp(value))
-    if (chain.some(value => isIP(value) === 0)) return ''
-    chain.push(peer)
-    for (let index = chain.length - 1; index >= 0; index -= 1) {
-      if (!trustedProxies.has(chain[index])) return chain[index]
-    }
-    return chain[0] ?? ''
-  }
-
-  function clientIp(req: IncomingMessage): string {
-    const peer = peerIp(req)
-    if (peer.length === 0) return ''
-    if (!trustedProxies.has(peer) || config.realIpHeader === 'none') return peer
-    return forwardedForClient(req, peer)
   }
 
   function isSecure(req: IncomingMessage): boolean {
@@ -134,28 +85,7 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
     }
   }
 
-  function isAllowlistAuthorityTrusted(req: IncomingMessage): boolean {
-    const host = firstHeader(req.headers, 'host')
-    if (host === undefined) return false
-    const hostUrl = parseAuthority(host)
-    if (hostUrl === undefined) return false
-    if (isLoopbackHostname(hostUrl.hostname) || isIpLiteralHostname(hostUrl.hostname)) return true
-    return isTrustedAuthority(hostUrl, config.trustedHosts)
-  }
-
   return {
-    decide(req) {
-      if (requestUrl(req) === undefined) return 'deny'
-      if (bootstrapToken(req) !== undefined) {
-        const authority = requestAuthority(req)
-        return authority !== undefined && isBrowserTrusted(req) ? 'bootstrap' : 'deny'
-      }
-      const authority = requestAuthority(req)
-      if (authority === undefined || !isBrowserTrusted(req)) return 'deny'
-      if (auth.hasRequestSession(req, authority)) return 'allow'
-      if (allowedIps.has(clientIp(req)) && isAllowlistAuthorityTrusted(req)) return 'allow'
-      return 'deny'
-    },
     bootstrapToken,
     cleanBootstrapLocation(req) {
       const url = requestUrl(req)
@@ -164,9 +94,16 @@ export function createAccessPolicy(config: Config, auth: AuthService): AccessPol
       const query = url.searchParams.toString()
       return `${url.pathname}${query.length > 0 ? `?${query}` : ''}`
     },
-    clientIp,
     isSecure,
     requestAuthority,
     isBrowserTrusted,
+    isHostAdminPath(req) {
+      const url = requestUrl(req)
+      return url !== undefined && isPrefixPath(url.pathname, HOST_ADMIN_PREFIX)
+    },
+    isPairingPath(req) {
+      const url = requestUrl(req)
+      return url !== undefined && isPrefixPath(url.pathname, PAIRING_PREFIX)
+    },
   }
 }
