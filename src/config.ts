@@ -8,9 +8,6 @@ export interface Config {
   sessionTtlDays: number
   renewalIntervalHours: number
   pendingTtlMinutes: number
-  rateMax: number
-  rateWindowMinutes: number
-  rateMaxKeys: number
   trustedProxies: string[]
   allowGeneratedToken: boolean
   bind: '0.0.0.0' | '127.0.0.1'
@@ -24,9 +21,6 @@ export const Config: Schema<Config> = Schema.object({
   sessionTtlDays: Schema.natural().min(1).max(365).default(30),
   renewalIntervalHours: Schema.natural().min(1).max(720).default(24),
   pendingTtlMinutes: Schema.natural().min(1).max(1440).default(15),
-  rateMax: Schema.natural().min(1).default(10),
-  rateWindowMinutes: Schema.natural().min(1).default(15),
-  rateMaxKeys: Schema.natural().min(1).max(100000).default(2048),
   trustedProxies: Schema.array(String).default([]),
   allowGeneratedToken: Schema.boolean().default(false),
   bind: Schema.union([Schema.const('0.0.0.0'), Schema.const('127.0.0.1')]).default('127.0.0.1'),
