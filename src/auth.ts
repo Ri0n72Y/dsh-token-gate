@@ -2,13 +2,8 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import type { IncomingMessage } from 'node:http'
 import type { Config } from './config.ts'
 
-interface RateBucket {
-  windowStart: number
-  count: number
-}
-
 export interface AuthService {
-  authorizeBootstrap(clientKey: string, submitted: string): boolean
+  authorizeBootstrap(submitted: string): boolean
   newPairingBearer(): string
   sessionBearerForPairing(pairingBearer: string): string
   digestBearer(value: string): string
@@ -50,42 +45,11 @@ function cookie(name: string, value: string, secure: boolean, maxAgeSeconds: num
 export function createAuthService(config: Config, token: string): AuthService {
   assertCookieName(config.cookieName)
   assertCookieName(config.pairingCookieName)
-  const rateWindowMs = config.rateWindowMinutes * 60 * 1000
   const expectedDigest = tokenDigest(token)
-  const attempts = new Map<string, RateBucket>()
-  let lastRateSweep = Date.now()
-
-  function sweepRateBuckets(now: number): void {
-    if (now - lastRateSweep < rateWindowMs) return
-    for (const [key, bucket] of attempts) {
-      if (now - bucket.windowStart >= rateWindowMs) attempts.delete(key)
-    }
-    lastRateSweep = now
-  }
-
-  function allowAttempt(key: string): boolean {
-    const now = Date.now()
-    sweepRateBuckets(now)
-    const existing = attempts.get(key)
-    if (existing !== undefined) {
-      if (now - existing.windowStart >= rateWindowMs) {
-        attempts.set(key, { windowStart: now, count: 1 })
-        return true
-      }
-      if (existing.count >= config.rateMax) return false
-      existing.count += 1
-      return true
-    }
-    if (attempts.size >= config.rateMaxKeys) return false
-    attempts.set(key, { windowStart: now, count: 1 })
-    return true
-  }
-
   const gatewayCookies = new Set([config.cookieName, config.pairingCookieName])
 
   return {
-    authorizeBootstrap(clientKey, submitted) {
-      if (!allowAttempt(clientKey)) return false
+    authorizeBootstrap(submitted) {
       return timingSafeEqual(tokenDigest(submitted), expectedDigest)
     },
 
