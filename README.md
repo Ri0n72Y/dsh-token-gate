@@ -28,6 +28,7 @@ remote browser
 - 根路径 `/?token=...` 只发起设备授权申请，**不会立即取得 DSH 访问权**。
 - token 被接受后会立即从可见 URL 中移除；浏览器持有短期 pairing cookie，并进入最小等待页面。
 - 主机通过本地 DSH Web 的 **Token Gate** settings tab 查看 pending/authorized devices，并批准、拒绝或撤销设备。
+- 已批准但浏览器尚未完成 session exchange 的申请会明确显示为 **Approved — waiting for device**；主机仍可在 exchange 前取消该次批准。
 - 管理 API 只注册在 loopback DSH Web 的 `/__token-gate/*`；gateway 明确拒绝代理该路径，因此远端已授权设备也不能借 gateway 管理主机。
 - 获批设备取得 HttpOnly session。授权状态通过 DSH `storageDomain` 持久化，DSH/token-gate 重启不会自动登出。
 - session 使用 sliding inactivity TTL。每个请求都校验 durable expiry，但默认只在约 24 小时后的第一次有效请求做一次持久续期，而不是每个请求写盘。
@@ -77,13 +78,14 @@ pending requests 与 authorized devices 保存在 token-gate 自己的 DSH stora
 主机本地 DSH Web 会加载 token-gate 的 `dsh.client` contribution，在 Plugins settings 中提供 **Token Gate** tab。它显示：
 
 - 待批准设备；
+- 已批准、等待浏览器完成 exchange 的设备；
 - 已授权设备；
 - authority 与浏览器描述；
-- 请求/授权时间；
+- 请求/批准/授权时间；
 - 最近一次持久续期活动；
 - session 到期时间。
 
-主机可以执行 **Approve / Reject / Revoke**。Revoke 只终止当前授权，不形成永久封禁。
+主机可以执行 **Approve / Reject / Revoke**；已批准但尚未 exchange 的申请可以取消批准。Revoke 只终止当前授权，不形成永久封禁。
 
 ## 请求转发
 
