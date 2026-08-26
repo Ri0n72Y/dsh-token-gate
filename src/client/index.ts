@@ -6,6 +6,8 @@ interface PendingDevice {
   browser?: string
   requestedAt: number
   expiresAt: number
+  state: 'pending' | 'approved'
+  approvedAt?: number
 }
 
 interface AuthorizedDevice {
@@ -86,14 +88,21 @@ function button(label: string, onClick: () => void): unknown {
 }
 
 function PendingRow({ item, act }: { item: PendingDevice; act: (kind: 'approve' | 'reject', id: string) => void }): unknown {
+  const approved = item.state === 'approved'
   return h('li', { key: item.id, style: { marginBottom: '1rem' } },
     h('strong', null, browser(item.browser)),
     h('div', null, `Authority: ${item.authority}`),
+    h('div', null, `Status: ${approved ? 'Approved — waiting for device' : 'Pending host approval'}`),
     h('div', null, `Requested: ${date(item.requestedAt)}`),
+    approved && item.approvedAt !== undefined ? h('div', null, `Approved: ${date(item.approvedAt)}`) : null,
     h('div', null, `Expires: ${date(item.expiresAt)}`),
     h('div', { style: { marginTop: '0.4rem' } },
-      button('Approve', () => act('approve', item.id)),
-      button('Reject', () => act('reject', item.id)),
+      approved
+        ? button('Cancel approval', () => act('reject', item.id))
+        : h('span', null,
+            button('Approve', () => act('approve', item.id)),
+            button('Reject', () => act('reject', item.id)),
+          ),
     ),
   )
 }
