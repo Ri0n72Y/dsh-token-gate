@@ -24,7 +24,9 @@
 - Serialize session issue, renewal and host revocation through the repository mutation chain so an in-flight exchange/renewal cannot recreate a revoked device.
 - Register host-only device management routes on the loopback DSH Web server and block those routes at the remote gateway boundary.
 - Add a DSH Web client contribution under Plugins settings for listing, approving, rejecting and revoking devices.
+- Expose the approved-but-not-yet-exchanged pairing state in the host device panel instead of presenting it as an ordinary pending request.
 - Remove IP allowlist authorization and its obsolete configuration/test surface while retaining trusted-proxy metadata only for HTTPS cookie semantics.
+- Remove the legacy peer-keyed bootstrap rate limiter: local reverse proxies collapse remote browsers onto one TCP peer, so that limiter could block every new pairing after unrelated invalid attempts. Any future throttling policy must be introduced from an explicit product requirement rather than inferred client-IP identity.
 
 ### Proxy / lifecycle engineering
 
