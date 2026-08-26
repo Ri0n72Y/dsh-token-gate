@@ -9,7 +9,6 @@ export const PAIRING_PREFIX = '/_token-gate'
 export interface AccessPolicy {
   bootstrapToken(req: IncomingMessage): string | undefined
   cleanBootstrapLocation(req: IncomingMessage): string
-  rateKey(req: IncomingMessage): string
   isSecure(req: IncomingMessage): boolean
   requestAuthority(req: IncomingMessage): string | undefined
   isBrowserTrusted(req: IncomingMessage): boolean
@@ -94,9 +93,6 @@ export function createAccessPolicy(config: Config): AccessPolicy {
       url.searchParams.delete('token')
       const query = url.searchParams.toString()
       return `${url.pathname}${query.length > 0 ? `?${query}` : ''}`
-    },
-    rateKey(req) {
-      return peerIp(req) || 'unknown'
     },
     isSecure,
     requestAuthority,
