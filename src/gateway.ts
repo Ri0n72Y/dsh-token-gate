@@ -161,7 +161,7 @@ export function createGateway(options: GatewayOptions): Gateway {
 
     const submitted = access.bootstrapToken(req)
     if (submitted !== undefined) {
-      if ((req.method ?? 'GET') !== 'GET' || !auth.authorizeBootstrap(`peer:${access.rateKey(req)}`, submitted)) {
+      if ((req.method ?? 'GET') !== 'GET' || !auth.authorizeBootstrap(submitted)) {
         notFound(res)
         return
       }
