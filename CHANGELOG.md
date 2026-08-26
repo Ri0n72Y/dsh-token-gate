@@ -27,6 +27,7 @@
 - Expose the approved-but-not-yet-exchanged pairing state in the host device panel instead of presenting it as an ordinary pending request.
 - Remove IP allowlist authorization and its obsolete configuration/test surface while retaining trusted-proxy metadata only for HTTPS cookie semantics.
 - Remove the legacy peer-keyed bootstrap rate limiter: local reverse proxies collapse remote browsers onto one TCP peer, so that limiter could block every new pairing after unrelated invalid attempts. Any future throttling policy must be introduced from an explicit product requirement rather than inferred client-IP identity.
+- Add targeted regression evidence for rejected/expired/consumed pairings, wrong-authority/expired device sessions, host-visible approval state, and issue/renewal versus revoke ordering.
 
 ### Proxy / lifecycle engineering
 
