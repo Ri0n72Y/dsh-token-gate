@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { HOST_ADMIN_PREFIX } from './access.ts'
-import type { AuthorizationRepository } from './authorization.ts'
+import type { AuthorizationRepository, PendingState } from './authorization.ts'
 
 export interface DeviceManagementSnapshot {
   pending: Array<{
@@ -9,6 +9,8 @@ export interface DeviceManagementSnapshot {
     browser?: string
     requestedAt: number
     expiresAt: number
+    state: PendingState
+    approvedAt?: number
   }>
   devices: Array<{
     id: string
@@ -74,6 +76,8 @@ export function createDeviceManagementService(repository: AuthorizationRepositor
           browser: record.browser,
           requestedAt: record.requestedAt,
           expiresAt: record.expiresAt,
+          state: record.state,
+          approvedAt: record.approvedAt,
         })),
         devices: repository.listDevices().map(({ id, record }) => ({
           id,
