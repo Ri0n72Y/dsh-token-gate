@@ -1,5 +1,8 @@
 # dsh-token-gate
 
+> [!IMPORTANT]
+> [DEPRECATED] supported by dsh official in 0.1.2-rc.1
+
 DeepSeek Harness 的轻量浏览器访问门。它让 DSH Web 保持在 loopback，通过独立 gateway 对远端浏览器提供设备配对、持久 session 与透明 HTTP/WebSocket 转发。
 
 > 当前 `main` 已实现 token bootstrap、进程内 session 与代理边界；`spec/` 描述的是下一步目标：**token 只发起设备授权申请，主机批准后才建立持久 session；session 随使用滑动续期，并可由主机撤销。**
